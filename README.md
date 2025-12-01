@@ -1,0 +1,2 @@
+# llinux
+ ubuntu bootstrap
