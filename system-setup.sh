@@ -732,45 +732,129 @@ install_git_lfs() {
 install_nodejs() {
     print_section "Node.js & npm"
 
-    # Check if node and npm are already installed
+    local target_node_version="20.19.5"
+    local skip_install=false
+
+    # Check if node and npm are already installed with correct version
     if command_exists node && command_exists npm; then
         local node_version
         local npm_version
-        node_version=$(node --version)
+        node_version=$(node --version | sed 's/^v//')
         npm_version=$(npm --version)
-        print_skip "Node.js ${node_version} & npm ${npm_version}"
+        
+        if [[ "${node_version}" == "${target_node_version}" ]]; then
+            print_skip "Node.js v${node_version} & npm ${npm_version}"
+            skip_install=true
+        else
+            print_status "Current Node.js version: ${node_version}, target: ${target_node_version}"
+        fi
+    fi
+
+    if [[ "${skip_install}" == false ]]; then
+        # Check if NodeSource repository is already added
+        local nodesource_list="/etc/apt/sources.list.d/nodesource.list"
+        local needs_repo_setup=false
+
+        if [[ ! -f "${nodesource_list}" ]]; then
+            needs_repo_setup=true
+        fi
+
+        if [[ "${needs_repo_setup}" == true ]]; then
+            if [[ "${DRY_RUN}" == true ]]; then
+                print_dry_run "Add NodeSource repository and install Node.js (LTS)"
+            else
+                print_status "Adding NodeSource repository for Node.js LTS..."
+                curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+                print_success "NodeSource repository added"
+            fi
+        else
+            print_skip "NodeSource repository"
+        fi
+
+        # Install nodejs (npm is included automatically)
+        apt_install nodejs
+
+        # Verify npm is available
+        if command_exists npm; then
+            local npm_version
+            npm_version=$(npm --version)
+            print_success "npm ${npm_version} installed"
+        fi
+
+        # Install 'n' package manager globally
+        if [[ "${DRY_RUN}" == true ]]; then
+            print_dry_run "npm install -g n"
+            print_dry_run "n ${target_node_version}"
+        else
+            if ! command_exists n; then
+                print_status "Installing 'n' Node version manager..."
+                sudo npm install -g n
+                print_success "'n' installed"
+            else
+                print_skip "'n' Node version manager"
+            fi
+
+            # Use 'n' to install specific Node.js version
+            print_status "Installing Node.js ${target_node_version} using 'n'..."
+            sudo n "${target_node_version}"
+            print_success "Node.js ${target_node_version} installed"
+
+            # Update PATH for current shell session
+            export PATH="/usr/local/bin:${PATH}"
+            
+            # Verify the correct version is now active
+            if command_exists node; then
+                local new_node_version
+                new_node_version=$(node --version)
+                print_success "Active Node.js version: ${new_node_version}"
+            fi
+        fi
+    fi
+}
+
+install_npm_packages() {
+    print_section "NPM Global Packages"
+
+    if ! command_exists npm; then
+        print_warning "npm not available, skipping npm packages"
         return 0
     fi
 
-    # Check if NodeSource repository is already added
-    local nodesource_list="/etc/apt/sources.list.d/nodesource.list"
-    local needs_repo_setup=false
+    local packages=(
+        "@webos-tools/cli"
+        "pnpm"
+    )
 
-    if [[ ! -f "${nodesource_list}" ]]; then
-        needs_repo_setup=true
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "npm install -g ${packages[*]}"
+        return 0
     fi
 
-    if [[ "${needs_repo_setup}" == true ]]; then
-        if [[ "${DRY_RUN}" == true ]]; then
-            print_dry_run "Add NodeSource repository and install Node.js (LTS)"
-            return 0
+    local installed_count=0
+    local skipped_count=0
+
+    for package in "${packages[@]}"; do
+        # Check if package is already installed globally
+        if npm list -g "${package}" &>/dev/null; then
+            print_skip "${package}"
+            skipped_count=$((skipped_count + 1))
+        else
+            print_status "Installing npm package: ${package}..."
+            if sudo npm install -g "${package}"; then
+                print_success "${package} installed"
+                installed_count=$((installed_count + 1))
+            else
+                print_warning "Failed to install ${package}"
+            fi
         fi
+    done
 
-        print_status "Adding NodeSource repository for Node.js LTS..."
-        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-        print_success "NodeSource repository added"
-    else
-        print_skip "NodeSource repository"
+    echo ""
+    if [[ ${installed_count} -gt 0 ]]; then
+        print_success "Newly installed: ${installed_count} packages"
     fi
-
-    # Install nodejs (npm is included automatically)
-    apt_install nodejs
-
-    # Verify npm is available
-    if command_exists npm; then
-        local npm_version
-        npm_version=$(npm --version)
-        print_success "npm ${npm_version} installed"
+    if [[ ${skipped_count} -gt 0 ]]; then
+        print_status "Already installed: ${skipped_count} packages"
     fi
 }
 
@@ -881,6 +965,7 @@ main() {
     install_git
     install_git_lfs
     install_nodejs
+    install_npm_packages
     install_brave
     install_slack
     install_cursor
