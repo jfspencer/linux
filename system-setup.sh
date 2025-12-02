@@ -990,6 +990,143 @@ install_npm_packages() {
     fi
 }
 
+install_desktop_settings() {
+    print_section "Desktop Settings (Ubuntu/Wayland)"
+
+    if ! command_exists gsettings; then
+        print_warning "gsettings not available, skipping desktop configuration"
+        return 0
+    fi
+
+    # Check if running on Wayland
+    local session_type="${XDG_SESSION_TYPE:-unknown}"
+    if [[ "${session_type}" == "wayland" ]]; then
+        print_status "Detected Wayland session"
+    elif [[ "${session_type}" == "x11" ]]; then
+        print_warning "Detected X11 session (Wayland recommended for Ubuntu)"
+    else
+        print_status "Session type: ${session_type}"
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Configure Ubuntu desktop settings (dark mode, dock, icons)"
+        return 0
+    fi
+
+    local changes_made=0
+
+    # Set dark mode (Ubuntu GNOME with Yaru theme)
+    local current_color_scheme
+    current_color_scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo "")
+    if [[ "${current_color_scheme}" != "'prefer-dark'" ]]; then
+        print_status "Setting appearance to dark mode..."
+        gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+        gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark'
+        gsettings set org.gnome.desktop.interface icon-theme 'Yaru-dark'
+        # Also set legacy settings for older apps
+        gsettings set org.gnome.desktop.wm.preferences theme 'Yaru-dark'
+        print_success "Dark mode enabled (Yaru-dark theme)"
+        changes_made=$((changes_made + 1))
+    else
+        print_skip "Dark mode (already enabled)"
+    fi
+
+    # Configure Ubuntu Dock (dash-to-dock is built into Ubuntu)
+    # Ubuntu uses a forked version with schema: org.gnome.shell.extensions.dash-to-dock
+    if gsettings list-schemas | grep -q "org.gnome.shell.extensions.dash-to-dock"; then
+        local dock_schema="org.gnome.shell.extensions.dash-to-dock"
+        
+        # Enable auto-hide (intellihide is Ubuntu's default smart hide)
+        local dock_fixed
+        dock_fixed=$(gsettings get ${dock_schema} dock-fixed 2>/dev/null || echo "true")
+        if [[ "${dock_fixed}" != "false" ]]; then
+            print_status "Enabling dock auto-hide..."
+            gsettings set ${dock_schema} dock-fixed false
+            gsettings set ${dock_schema} autohide true
+            gsettings set ${dock_schema} intellihide true
+            gsettings set ${dock_schema} intellihide-mode 'ALL_WINDOWS'
+            # Wayland-specific: ensure proper behavior
+            gsettings set ${dock_schema} autohide-in-fullscreen false
+            print_success "Dock auto-hide enabled (intellihide mode)"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Dock auto-hide (already enabled)"
+        fi
+
+        # Turn off panel mode (extend-height makes dock span full height)
+        local extend_height
+        extend_height=$(gsettings get ${dock_schema} extend-height 2>/dev/null || echo "true")
+        if [[ "${extend_height}" != "false" ]]; then
+            print_status "Disabling dock panel mode..."
+            gsettings set ${dock_schema} extend-height false
+            print_success "Panel mode disabled"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Panel mode (already disabled)"
+        fi
+
+        # Set icon size to smallest (Ubuntu default is 48, smallest practical is 24)
+        local icon_size
+        icon_size=$(gsettings get ${dock_schema} dash-max-icon-size 2>/dev/null || echo "48")
+        if [[ "${icon_size}" != "16" ]]; then
+            print_status "Setting dock icon size to smallest..."
+            gsettings set ${dock_schema} dash-max-icon-size 16
+            print_success "Icon size set to 16px (smallest)"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Icon size (already at smallest)"
+        fi
+
+        # Position dock to bottom
+        local dock_position
+        dock_position=$(gsettings get ${dock_schema} dock-position 2>/dev/null || echo "'LEFT'")
+        if [[ "${dock_position}" != "'BOTTOM'" ]]; then
+            print_status "Positioning dock to bottom..."
+            gsettings set ${dock_schema} dock-position 'BOTTOM'
+            print_success "Dock positioned to bottom"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Dock position (already at bottom)"
+        fi
+
+        changes_made=$((changes_made + 1))
+    else
+        print_warning "Ubuntu Dock (dash-to-dock) not found, skipping dock settings"
+    fi
+
+    # Set desktop icon position to top-right (Ubuntu 23.04+ uses DING extension)
+    if gsettings list-schemas | grep -q "org.gnome.shell.extensions.ding"; then
+        local start_corner
+        start_corner=$(gsettings get org.gnome.shell.extensions.ding start-corner 2>/dev/null || echo "'top-left'")
+        if [[ "${start_corner}" != "'top-right'" ]]; then
+            print_status "Setting desktop icons to start from top-right..."
+            gsettings set org.gnome.shell.extensions.ding start-corner 'top-right'
+            # Also configure icon arrangement
+            gsettings set org.gnome.shell.extensions.ding icon-size 'small'
+            gsettings set org.gnome.shell.extensions.ding show-home false
+            gsettings set org.gnome.shell.extensions.ding show-trash true
+            gsettings set org.gnome.shell.extensions.ding show-volumes true
+            print_success "Desktop icons set to top-right (DING extension)"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Desktop icons position (already top-right)"
+        fi
+    else
+        print_warning "DING extension not found (Ubuntu desktop icons)"
+    fi
+
+    echo ""
+    if [[ ${changes_made} -gt 0 ]]; then
+        print_success "Ubuntu desktop settings configured (${changes_made} changes made)"
+        if [[ "${session_type}" == "wayland" ]]; then
+            print_status "Wayland detected - settings optimized for Wayland session"
+        fi
+        print_status "You may need to log out and back in for all changes to take effect"
+    else
+        print_status "All desktop settings already configured"
+    fi
+}
+
 # =============================================================================
 # Main Execution
 # =============================================================================
@@ -1109,6 +1246,7 @@ main() {
     install_vmware
     install_jdk
     install_tizen_studio
+    install_desktop_settings
 
     # Cleanup
     print_section "System Cleanup"
