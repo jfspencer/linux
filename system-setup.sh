@@ -1213,6 +1213,56 @@ install_docker() {
     fi
 }
 
+install_twingate() {
+    print_section "Twingate VPN Client"
+
+    if command_exists twingate || package_installed twingate; then
+        print_skip "Twingate"
+        return 0
+    fi
+
+    local keyring="/usr/share/keyrings/twingate-client-keyring.gpg"
+    local sources_file="/etc/apt/sources.list.d/twingate.list"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Twingate (add GPG key, repo, and install package)"
+        return 0
+    fi
+
+    # Ensure required dependencies are installed
+    print_status "Checking Twingate dependencies..."
+    apt_install curl gpg ca-certificates
+
+    # Add GPG key if not present
+    if ! gpg_key_exists "${keyring}"; then
+        print_status "Adding Twingate GPG key..."
+        curl -fsSL https://packages.twingate.com/apt/gpg.key | \
+            sudo gpg --dearmor -o "${keyring}"
+        print_success "GPG key added"
+    else
+        print_skip "Twingate GPG key"
+    fi
+
+    # Add repository if not present
+    if [[ ! -f "${sources_file}" ]]; then
+        print_status "Adding Twingate repository..."
+        echo "deb [signed-by=${keyring}] https://packages.twingate.com/apt/ * *" | \
+            sudo tee "${sources_file}" > /dev/null
+        print_success "Repository added"
+    else
+        print_skip "Twingate repository"
+    fi
+
+    apt_update
+    apt_install twingate
+
+    echo ""
+    print_success "Twingate installed successfully!"
+    print_warning "Configure Twingate by running: sudo twingate setup"
+    print_status "Network name: angelstudios"
+    echo ""
+}
+
 install_desktop_settings() {
     print_section "Desktop Settings (Ubuntu/Wayland)"
 
@@ -1350,6 +1400,59 @@ install_desktop_settings() {
     fi
 }
 
+install_ffmpeg() {
+    print_section "FFmpeg"
+
+    if command_exists ffmpeg; then
+        local ffmpeg_version
+        ffmpeg_version=$(ffmpeg -version 2>&1 | head -n 1 | awk '{print $3}')
+        print_skip "FFmpeg (version ${ffmpeg_version})"
+        return 0
+    fi
+
+    apt_install ffmpeg
+}
+
+install_spotify() {
+    print_section "Spotify"
+
+    if command_exists spotify || package_installed spotify-client; then
+        print_skip "Spotify"
+        return 0
+    fi
+
+    local keyring="/etc/apt/trusted.gpg.d/spotify.gpg"
+    local sources_file="/etc/apt/sources.list.d/spotify.list"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Spotify (add GPG key, repo, and install package)"
+        return 0
+    fi
+
+    # Add GPG key if not present
+    if ! gpg_key_exists "${keyring}"; then
+        print_status "Adding Spotify GPG key..."
+        curl -sS https://download.spotify.com/debian/pubkey_5384CE82BA52C83A.asc | \
+            sudo gpg --dearmor --yes -o "${keyring}"
+        print_success "GPG key added"
+    else
+        print_skip "Spotify GPG key"
+    fi
+
+    # Add repository if not present
+    if [[ ! -f "${sources_file}" ]]; then
+        print_status "Adding Spotify repository..."
+        echo "deb https://repository.spotify.com stable non-free" | \
+            sudo tee "${sources_file}" > /dev/null
+        print_success "Repository added"
+    else
+        print_skip "Spotify repository"
+    fi
+
+    apt_update
+    apt_install spotify-client
+}
+
 # =============================================================================
 # Main Execution
 # =============================================================================
@@ -1473,7 +1576,10 @@ main() {
     install_vmware
     install_jdk
     install_tizen_studio
+    install_twingate
     install_desktop_settings
+    install_ffmpeg
+    install_spotify
 
     # Cleanup
     print_section "System Cleanup"
