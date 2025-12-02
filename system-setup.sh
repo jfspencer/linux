@@ -53,7 +53,6 @@ readonly FLATPAK_APPS=(
     "org.gnome.gitlab.YaLTeR.VideoTrimmer|Video Trimmer"
     "app.drey.Warp|Warp"
     "dev.mufeed.Wordbook|Wordbook"
-    "io.github.shiftey.Desktop|GitHub Desktop"
 )
 
 # NPM global packages to install
@@ -603,6 +602,27 @@ install_1password() {
     apt_install 1password
 }
 
+install_drawio() {
+    print_section "draw.io (diagrams.net)"
+
+    # Check if draw.io is already installed
+    if command_exists drawio || package_installed drawio; then
+        print_skip "draw.io"
+        return 0
+    fi
+
+    local drawio_deb
+    drawio_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "drawio*.deb" 2>/dev/null | head -n1)
+
+    if [[ -z "${drawio_deb}" ]]; then
+        print_warning "draw.io .deb not found in ${SETUP_ARTIFACTS_DIR}"
+        print_warning "Download from https://github.com/jgraph/drawio-desktop/releases"
+        return 1
+    fi
+
+    apt_install_deb "${drawio_deb}" "draw.io"
+}
+
 install_flatpaks() {
     print_section "Install Flatpak Apps"
 
@@ -866,6 +886,45 @@ install_git_lfs() {
     fi
 }
 
+install_github_desktop() {
+    print_section "GitHub Desktop"
+
+    if command_exists github-desktop || package_installed github-desktop; then
+        print_skip "GitHub Desktop"
+        return 0
+    fi
+
+    local keyring="/usr/share/keyrings/mwt-desktop.gpg"
+    local sources_file="/etc/apt/sources.list.d/mwt-desktop.list"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install GitHub Desktop (add GPG key, repo, and install package)"
+        return 0
+    fi
+
+    # Add GPG key if not present
+    if ! gpg_key_exists "${keyring}"; then
+        print_status "Adding GitHub Desktop GPG key..."
+        wget -qO - https://mirror.mwt.me/shiftkey-desktop/gpgkey | \
+            gpg --dearmor | sudo tee "${keyring}" > /dev/null
+        print_success "GPG key added"
+    else
+        print_skip "GitHub Desktop GPG key"
+    fi
+
+    # Add repository if not present
+    if [[ ! -f "${sources_file}" ]]; then
+        print_status "Adding GitHub Desktop repository..."
+        sudo sh -c 'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/mwt-desktop.gpg] https://mirror.mwt.me/shiftkey-desktop/deb/ any main" > /etc/apt/sources.list.d/mwt-desktop.list'
+        print_success "Repository added"
+    else
+        print_skip "GitHub Desktop repository"
+    fi
+
+    apt_update
+    apt_install github-desktop
+}
+
 install_nodejs() {
     print_section "Node.js & npm"
 
@@ -987,6 +1046,170 @@ install_npm_packages() {
     fi
     if [[ ${skipped_count} -gt 0 ]]; then
         print_status "Already installed: ${skipped_count} packages"
+    fi
+}
+
+install_bun() {
+    print_section "Bun Runtime"
+
+    # Check if bun is already installed (check both PATH and file location)
+    local bun_path="${HOME}/.bun/bin/bun"
+    if command_exists bun || [[ -f "${bun_path}" ]]; then
+        local bun_version
+        if command_exists bun; then
+            bun_version=$(bun --version)
+        else
+            bun_version=$("${bun_path}" --version)
+        fi
+        print_skip "Bun (version ${bun_version})"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Bun via official install script"
+        print_dry_run "Add Bun to PATH in .bashrc"
+        return 0
+    fi
+
+    print_status "Installing Bun runtime..."
+    curl -fsSL https://bun.sh/install | bash
+    print_success "Bun installed"
+
+    # Add bun to PATH in .bashrc if not already present
+    local path_entry="export PATH=\"\${HOME}/.bun/bin:\${PATH}\""
+    local bashrc="${HOME}/.bashrc"
+
+    if ! grep -qF ".bun/bin" "${bashrc}" 2>/dev/null; then
+        print_status "Adding Bun to PATH in .bashrc..."
+        echo "" >> "${bashrc}"
+        echo "# Bun" >> "${bashrc}"
+        echo "${path_entry}" >> "${bashrc}"
+        print_success "Added Bun to PATH"
+    else
+        print_skip "Bun PATH entry"
+    fi
+
+    # Update PATH for current shell session
+    export PATH="${HOME}/.bun/bin:${PATH}"
+
+    # Verify installation
+    if command_exists bun; then
+        local bun_version
+        bun_version=$(bun --version)
+        print_success "Bun ${bun_version} installed successfully"
+    else
+        print_warning "Bun installed but not found in PATH (may need to restart shell)"
+    fi
+}
+
+install_docker() {
+    print_section "Docker & Docker Desktop"
+
+    local docker_installed=false
+    local docker_desktop_installed=false
+
+    # Check if Docker is already installed
+    if command_exists docker; then
+        local docker_version
+        docker_version=$(docker --version | awk '{print $3}' | sed 's/,//')
+        print_skip "Docker Engine (version ${docker_version})"
+        docker_installed=true
+    fi
+
+    # Check if Docker Desktop is already installed
+    if command_exists docker-desktop || package_installed docker-desktop; then
+        print_skip "Docker Desktop"
+        docker_desktop_installed=true
+    fi
+
+    # If both are installed, we're done
+    if [[ "${docker_installed}" == true ]] && [[ "${docker_desktop_installed}" == true ]]; then
+        return 0
+    fi
+
+    # Install Docker Engine if not present
+    if [[ "${docker_installed}" == false ]]; then
+        local keyring="/usr/share/keyrings/docker-archive-keyring.gpg"
+        local sources_file="/etc/apt/sources.list.d/docker.list"
+
+        if [[ "${DRY_RUN}" == true ]]; then
+            print_dry_run "Install Docker Engine (add GPG key, repo, and install packages)"
+        else
+            # Add Docker's official GPG key if not present
+            if ! gpg_key_exists "${keyring}"; then
+                print_status "Adding Docker GPG key..."
+                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+                    sudo gpg --dearmor --output "${keyring}"
+                print_success "Docker GPG key added"
+            else
+                print_skip "Docker GPG key"
+            fi
+
+            # Add Docker repository if not present
+            if [[ ! -f "${sources_file}" ]]; then
+                print_status "Adding Docker repository..."
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+                    sudo tee "${sources_file}" > /dev/null
+                print_success "Docker repository added"
+            else
+                print_skip "Docker repository"
+            fi
+
+            apt_update
+        fi
+
+        # Install Docker Engine packages
+        apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+        if [[ "${DRY_RUN}" != true ]]; then
+            # Add current user to docker group
+            if groups "${USER}" | grep -qw docker; then
+                print_skip "User '${USER}' in docker group"
+            else
+                print_status "Adding user '${USER}' to docker group..."
+                sudo usermod -aG docker "${USER}"
+                print_success "User added to docker group"
+                print_warning "You'll need to log out and back in for group changes to take effect"
+            fi
+
+            # Start and enable Docker service
+            if systemctl is-active --quiet docker; then
+                print_skip "Docker service (already running)"
+            else
+                print_status "Starting Docker service..."
+                sudo systemctl start docker
+                sudo systemctl enable docker
+                print_success "Docker service started and enabled"
+            fi
+        fi
+    fi
+
+    # Install Docker Desktop if not present
+    if [[ "${docker_desktop_installed}" == false ]]; then
+        local docker_desktop_deb
+        docker_desktop_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "docker-desktop*.deb" 2>/dev/null | head -n1)
+
+        if [[ -z "${docker_desktop_deb}" ]]; then
+            print_warning "Docker Desktop .deb not found in ${SETUP_ARTIFACTS_DIR}"
+            print_warning "Download from https://docs.docker.com/desktop/install/ubuntu/"
+            return 1
+        fi
+
+        # Install Docker Desktop dependencies first
+        apt_install pass gnome-keyring
+
+        apt_install_deb "${docker_desktop_deb}" "Docker Desktop"
+    fi
+
+    if [[ "${docker_installed}" == false ]] && [[ "${DRY_RUN}" != true ]]; then
+        echo ""
+        print_success "Docker installation complete!"
+        print_status "Docker version: $(docker --version 2>/dev/null || echo 'N/A')"
+        print_status "Docker Compose version: $(docker compose version 2>/dev/null || echo 'N/A')"
+        
+        if [[ "${docker_desktop_installed}" == false ]]; then
+            print_status "Docker Desktop can be launched from your applications menu"
+        fi
     fi
 }
 
@@ -1233,13 +1456,17 @@ main() {
     install_flatpak
     install_git
     install_git_lfs
+    install_github_desktop
     install_nodejs
     install_npm_packages
+    install_bun
+    install_docker
     install_brave
     install_google_chrome
     install_chromium
     install_slack
     install_cursor
+    install_drawio
     install_1password
     install_flatpaks
     install_jetbrains_toolbox
