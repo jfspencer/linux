@@ -1453,6 +1453,27 @@ install_spotify() {
     apt_install spotify-client
 }
 
+install_zoom() {
+    print_section "Zoom Video Conferencing"
+
+    # Check if Zoom is already installed
+    if command_exists zoom || package_installed zoom; then
+        print_skip "Zoom"
+        return 0
+    fi
+
+    local zoom_deb
+    zoom_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "zoom*.deb" 2>/dev/null | head -n1)
+
+    if [[ -z "${zoom_deb}" ]]; then
+        print_warning "Zoom .deb not found in ${SETUP_ARTIFACTS_DIR}"
+        print_warning "Download from https://zoom.us/download?os=linux"
+        return 1
+    fi
+
+    apt_install_deb "${zoom_deb}" "Zoom"
+}
+
 # =============================================================================
 # Main Execution
 # =============================================================================
@@ -1580,6 +1601,7 @@ main() {
     install_desktop_settings
     install_ffmpeg
     install_spotify
+    install_zoom
 
     # Cleanup
     print_section "System Cleanup"
