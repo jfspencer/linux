@@ -31,6 +31,38 @@ PAUSE_FOR_REBOOT=true
 DRY_RUN=false
 
 # =============================================================================
+# Application Lists
+# =============================================================================
+
+# Flatpak applications to install
+readonly FLATPAK_APPS=(
+    "org.gnome.World.PikaBackup|Pika Backup"
+    "io.github.fizzyizzy05.binary|Binary"
+    "dev.geopjr.Collision|Collision"
+    "com.github.huluti.Curtail|Curtail"
+    "app.drey.Dialect|Dialect"
+    "org.gnome.design.Emblem|Emblem"
+    "io.github.mrvladus.List|List (Errands)"
+    "com.github.finefindus.eyedropper|Eyedropper"
+    "org.gnome.World.Iotas|Iotas"
+    "se.sjoerd.Graphs|Graphs"
+    "de.schmidhuberj.DieBahn|Die Bahn"
+    "org.gnome.Solanum|Solanum"
+    "io.gitlab.adhami3310.Converter|Converter"
+    "io.github.idevecore.Valuta|Valuta"
+    "org.gnome.gitlab.YaLTeR.VideoTrimmer|Video Trimmer"
+    "app.drey.Warp|Warp"
+    "dev.mufeed.Wordbook|Wordbook"
+    "io.github.shiftey.Desktop|GitHub Desktop"
+)
+
+# NPM global packages to install
+readonly NPM_PACKAGES=(
+    "@webos-tools/cli"
+    "pnpm"
+)
+
+# =============================================================================
 # Logging & Output
 # =============================================================================
 
@@ -422,6 +454,57 @@ install_brave() {
     print_success "Brave browser installed"
 }
 
+install_google_chrome() {
+    print_section "Google Chrome"
+
+    if command_exists google-chrome || package_installed google-chrome-stable; then
+        print_skip "Google Chrome"
+        return 0
+    fi
+
+    local keyring="/usr/share/keyrings/google-chrome-keyring.gpg"
+    local sources_file="/etc/apt/sources.list.d/google-chrome.list"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Google Chrome (add GPG key, repo, and install package)"
+        return 0
+    fi
+
+    # Add GPG key if not present
+    if ! gpg_key_exists "${keyring}"; then
+        print_status "Adding Google Chrome GPG key..."
+        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | \
+            sudo gpg --dearmor --output "${keyring}"
+        print_success "GPG key added"
+    else
+        print_skip "Google Chrome GPG key"
+    fi
+
+    # Add repository if not present
+    if [[ ! -f "${sources_file}" ]]; then
+        print_status "Adding Google Chrome repository..."
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://dl.google.com/linux/chrome/deb/ stable main" | \
+            sudo tee "${sources_file}" > /dev/null
+        print_success "Repository added"
+    else
+        print_skip "Google Chrome repository"
+    fi
+
+    apt_update
+    apt_install google-chrome-stable
+}
+
+install_chromium() {
+    print_section "Chromium Browser"
+
+    if command_exists chromium-browser || command_exists chromium || package_installed chromium-browser; then
+        print_skip "Chromium browser"
+        return 0
+    fi
+
+    apt_install chromium-browser
+}
+
 install_slack() {
     print_section "Slack"
 
@@ -533,32 +616,11 @@ install_flatpaks() {
         return 0
     fi
 
-    local apps=(
-        "org.gnome.World.PikaBackup|Pika Backup"
-        "io.github.fizzyizzy05.binary|Binary"
-        "dev.geopjr.Collision|Collision"
-        "com.github.huluti.Curtail|Curtail"
-        "app.drey.Dialect|Dialect"
-        "org.gnome.design.Emblem|Emblem"
-        "io.github.mrvladus.List|List (Errands)"
-        "com.github.finefindus.eyedropper|Eyedropper"
-        "org.gnome.World.Iotas|Iotas"
-        "se.sjoerd.Graphs|Graphs"
-        "de.schmidhuberj.DieBahn|Die Bahn"
-        "org.gnome.Solanum|Solanum"
-        "io.gitlab.adhami3310.Converter|Converter"
-        "io.github.idevecore.Valuta|Valuta"
-        "org.gnome.gitlab.YaLTeR.VideoTrimmer|Video Trimmer"
-        "app.drey.Warp|Warp"
-        "dev.mufeed.Wordbook|Wordbook"
-        "io.github.shiftey.Desktop|GitHub Desktop"
-    )
-
     local failed_apps=()
     local installed_count=0
     local skipped_count=0
 
-    for app_entry in "${apps[@]}"; do
+    for app_entry in "${FLATPAK_APPS[@]}"; do
         local app_id="${app_entry%%|*}"
         local app_name="${app_entry##*|}"
 
@@ -686,6 +748,81 @@ install_vmware() {
     chmod +x "${vmware_bundle}"
     sudo "${vmware_bundle}"
     print_success "VMware installation completed"
+}
+
+install_jdk() {
+    print_section "Java Development Kit (JDK)"
+
+    # Check if java and javac are already installed
+    if command_exists java && command_exists javac; then
+        local java_version
+        java_version=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
+        print_skip "JDK (Java ${java_version})"
+        return 0
+    fi
+
+    # Install OpenJDK (using default JDK package)
+    apt_install default-jdk
+
+    # Verify installation
+    if command_exists java && command_exists javac; then
+        local java_version
+        java_version=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
+        print_success "JDK installed (Java ${java_version})"
+    else
+        print_warning "JDK installation completed but java/javac not found in PATH"
+    fi
+}
+
+install_tizen_studio() {
+    print_section "Tizen Studio Web CLI"
+
+    # Check if sdb is already installed (check both PATH and file location)
+    local sdb_path="${HOME}/tizen-studio/tools/sdb"
+    if command_exists sdb || [[ -f "${sdb_path}" ]]; then
+        print_skip "Tizen Studio Web CLI"
+        return 0
+    fi
+
+    # Check for JDK dependency
+    if ! command_exists java || ! command_exists javac; then
+        print_error "JDK is required for Tizen Studio but not found"
+        print_error "Please install JDK first (run install_jdk)"
+        return 1
+    fi
+
+    local tizen_installer="${SETUP_ARTIFACTS_DIR}/web-cli_Tizen_Studio_6.1_ubuntu-64.bin"
+
+    if [[ ! -f "${tizen_installer}" ]]; then
+        print_warning "Tizen Studio installer not found: ${tizen_installer}"
+        print_warning "Download from https://developer.tizen.org/development/tizen-studio/download"
+        return 1
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Tizen Studio from ${tizen_installer}"
+        print_dry_run "Add Tizen Studio sdb to PATH in .bashrc"
+        return 0
+    fi
+
+    print_status "Installing Tizen Studio Web CLI from ${tizen_installer}..."
+    chmod +x "${tizen_installer}"
+    "${tizen_installer}"
+    print_success "Tizen Studio installation completed"
+
+    # Add sdb to PATH in .bashrc if not already present
+    local path_entry="export PATH=\"\${HOME}/tizen-studio/tools:\${PATH}\""
+    local bashrc="${HOME}/.bashrc"
+
+    if ! grep -qF "tizen-studio/tools" "${bashrc}" 2>/dev/null; then
+        print_status "Adding Tizen Studio sdb to PATH in .bashrc..."
+        echo "" >> "${bashrc}"
+        echo "# Tizen Studio" >> "${bashrc}"
+        echo "${path_entry}" >> "${bashrc}"
+        print_success "Added Tizen Studio sdb to PATH"
+    else
+        print_skip "Tizen Studio PATH entry"
+    fi
 }
 
 install_git() {
@@ -820,20 +957,15 @@ install_npm_packages() {
         return 0
     fi
 
-    local packages=(
-        "@webos-tools/cli"
-        "pnpm"
-    )
-
     if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "npm install -g ${packages[*]}"
+        print_dry_run "npm install -g ${NPM_PACKAGES[*]}"
         return 0
     fi
 
     local installed_count=0
     local skipped_count=0
 
-    for package in "${packages[@]}"; do
+    for package in "${NPM_PACKAGES[@]}"; do
         # Check if package is already installed globally
         if npm list -g "${package}" &>/dev/null; then
             print_skip "${package}"
@@ -967,12 +1099,16 @@ main() {
     install_nodejs
     install_npm_packages
     install_brave
+    install_google_chrome
+    install_chromium
     install_slack
     install_cursor
     install_1password
     install_flatpaks
     install_jetbrains_toolbox
     install_vmware
+    install_jdk
+    install_tizen_studio
 
     # Final summary
     print_section "Setup Complete"
