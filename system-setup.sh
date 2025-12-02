@@ -1110,6 +1110,13 @@ main() {
     install_jdk
     install_tizen_studio
 
+    # Cleanup
+    print_section "System Cleanup"
+    print_status "Running apt auto cleanup..."
+    sudo apt autoremove -y 2>&1 | tee -a "${LOG_FILE}"
+    sudo apt autoclean -y 2>&1 | tee -a "${LOG_FILE}"
+    print_success "Cleanup completed"
+
     # Final summary
     print_section "Setup Complete"
     print_success "System setup finished successfully!"
