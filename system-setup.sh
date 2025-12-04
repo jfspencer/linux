@@ -1474,6 +1474,17 @@ install_zoom() {
     apt_install_deb "${zoom_deb}" "Zoom"
 }
 
+install_gimp() {
+    print_section "GIMP Image Editor"
+
+    if command_exists gimp || package_installed gimp; then
+        print_skip "GIMP"
+        return 0
+    fi
+
+    apt_install gimp
+}
+
 # =============================================================================
 # Main Execution
 # =============================================================================
@@ -1602,6 +1613,7 @@ main() {
     install_ffmpeg
     install_spotify
     install_zoom
+    install_gimp
 
     # Cleanup
     print_section "System Cleanup"
