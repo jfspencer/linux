@@ -1474,6 +1474,27 @@ install_zoom() {
     apt_install_deb "${zoom_deb}" "Zoom"
 }
 
+install_protonmail() {
+    print_section "Proton Mail Desktop"
+
+    # Check if Proton Mail is already installed
+    if command_exists proton-mail || package_installed proton-mail; then
+        print_skip "Proton Mail"
+        return 0
+    fi
+
+    local protonmail_deb
+    protonmail_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "ProtonMail*.deb" -o -name "protonmail*.deb" 2>/dev/null | head -n1)
+
+    if [[ -z "${protonmail_deb}" ]]; then
+        print_warning "Proton Mail .deb not found in ${SETUP_ARTIFACTS_DIR}"
+        print_warning "Download from https://proton.me/mail/download"
+        return 1
+    fi
+
+    apt_install_deb "${protonmail_deb}" "Proton Mail"
+}
+
 install_gimp() {
     print_section "GIMP Image Editor"
 
@@ -1613,6 +1634,7 @@ main() {
     install_ffmpeg
     install_spotify
     install_zoom
+    install_protonmail
     install_gimp
 
     # Cleanup
