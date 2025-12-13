@@ -1506,6 +1506,27 @@ install_gimp() {
     apt_install gimp
 }
 
+install_steam() {
+    print_section "Steam"
+
+    # Check if Steam is already installed
+    if command_exists steam || package_installed steam-launcher; then
+        print_skip "Steam"
+        return 0
+    fi
+
+    local steam_deb
+    steam_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "steam*.deb" 2>/dev/null | head -n1)
+
+    if [[ -z "${steam_deb}" ]]; then
+        print_warning "Steam .deb not found in ${SETUP_ARTIFACTS_DIR}"
+        print_warning "Download from https://store.steampowered.com/about/"
+        return 1
+    fi
+
+    apt_install_deb "${steam_deb}" "Steam"
+}
+
 # =============================================================================
 # Main Execution
 # =============================================================================
@@ -1636,6 +1657,7 @@ main() {
     install_zoom
     install_protonmail
     install_gimp
+    install_steam
 
     # Cleanup
     print_section "System Cleanup"
