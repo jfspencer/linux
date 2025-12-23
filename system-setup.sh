@@ -53,6 +53,7 @@ readonly FLATPAK_APPS=(
     "org.gnome.gitlab.YaLTeR.VideoTrimmer|Video Trimmer"
     "app.drey.Warp|Warp"
     "dev.mufeed.Wordbook|Wordbook"
+    "org.libreoffice.LibreOffice|LibreOffice"
 )
 
 # NPM global packages to install
