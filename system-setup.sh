@@ -39,6 +39,7 @@ readonly FLATPAK_APPS=(
     "org.gnome.World.PikaBackup|Pika Backup"
     "io.github.fizzyizzy05.binary|Binary"
     "dev.geopjr.Collision|Collision"
+    "io.github.wartybix.Constrict|Constrict"
     "com.github.huluti.Curtail|Curtail"
     "app.drey.Dialect|Dialect"
     "org.gnome.design.Emblem|Emblem"
