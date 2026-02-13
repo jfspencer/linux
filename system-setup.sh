@@ -20,7 +20,6 @@ set -euo pipefail
 # =============================================================================
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SETUP_ARTIFACTS_DIR="${SCRIPT_DIR}/setup_artifacts"
 readonly LOG_FILE="${SCRIPT_DIR}/setup-$(date +%Y%m%d-%H%M%S).log"
 
 # Feature flags (can be overridden via command line)
@@ -55,6 +54,11 @@ readonly FLATPAK_APPS=(
     "app.drey.Warp|Warp"
     "dev.mufeed.Wordbook|Wordbook"
     "org.libreoffice.LibreOffice|LibreOffice"
+    "com.slack.Slack|Slack"
+    "com.jgraph.drawio.desktop|draw.io"
+    "us.zoom.Zoom|Zoom"
+    "me.proton.Mail|Proton Mail"
+    "com.valvesoftware.Steam|Steam"
 )
 
 # NPM global packages to install
@@ -188,16 +192,6 @@ has_nvidia_gpu() {
     lspci 2>/dev/null | grep -qi "nvidia"
 }
 
-require_file() {
-    local file="$1"
-    local description="${2:-file}"
-    if [[ ! -f "${file}" ]]; then
-        print_error "Required ${description} not found: ${file}"
-        return 1
-    fi
-    return 0
-}
-
 confirm_action() {
     local prompt="$1"
     local default="${2:-n}"
@@ -282,41 +276,6 @@ apt_install() {
         local exit_code=$?
         log "ERROR" "apt install output: ${apt_output}"
         print_error "apt install failed for ${packages_to_install[*]} (exit code ${exit_code}). Output:"
-        echo "${apt_output}" >&2
-        return ${exit_code}
-    fi
-}
-
-apt_install_deb() {
-    local deb_file="$1"
-    local package_name="${2:-$(basename "${deb_file}" .deb)}"
-
-    # Extract package name from .deb to check if installed
-    local pkg_name
-    pkg_name=$(dpkg-deb -f "${deb_file}" Package 2>/dev/null || echo "${package_name}")
-
-    if package_installed "${pkg_name}"; then
-        print_skip "${package_name}"
-        return 0
-    fi
-
-    if ! require_file "${deb_file}" "package file"; then
-        return 1
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "apt install ${deb_file}"
-        return 0
-    fi
-
-    print_status "Installing ${package_name} from .deb file..."
-    local apt_output
-    if apt_output=$(sudo apt install -y "${deb_file}" 2>&1); then
-        print_success "${package_name} installed"
-    else
-        local exit_code=$?
-        log "ERROR" "apt install deb output: ${apt_output}"
-        print_error "Failed to install ${package_name} (exit code ${exit_code}). Output:"
         echo "${apt_output}" >&2
         return ${exit_code}
     fi
@@ -538,46 +497,6 @@ install_chromium() {
     apt_install chromium-browser
 }
 
-install_slack() {
-    print_section "Slack"
-
-    # Check if Slack desktop is already installed
-    if command_exists slack || package_installed slack-desktop; then
-        print_skip "Slack"
-        return 0
-    fi
-
-    local slack_deb="${SETUP_ARTIFACTS_DIR}/slack-desktop-4.46.101-amd64.deb"
-
-    if [[ ! -f "${slack_deb}" ]]; then
-        print_warning "Slack .deb not found: ${slack_deb}"
-        print_warning "Download from https://slack.com/downloads/linux"
-        return 1
-    fi
-
-    apt_install_deb "${slack_deb}" "Slack"
-}
-
-install_cursor() {
-    print_section "Cursor IDE"
-
-    # Check if cursor is already installed
-    if command_exists cursor || package_installed cursor; then
-        print_skip "Cursor IDE"
-        return 0
-    fi
-
-    local cursor_deb
-    cursor_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "cursor*.deb" 2>/dev/null | head -n1)
-
-    if [[ -z "${cursor_deb}" ]]; then
-        print_warning "Cursor .deb not found in ${SETUP_ARTIFACTS_DIR}"
-        print_warning "Download from https://cursor.sh"
-        return 1
-    fi
-
-    apt_install_deb "${cursor_deb}" "Cursor IDE"
-}
 
 install_1password() {
     print_section "1Password"
@@ -636,26 +555,6 @@ install_1password() {
     apt_install 1password
 }
 
-install_drawio() {
-    print_section "draw.io (diagrams.net)"
-
-    # Check if draw.io is already installed
-    if command_exists drawio || package_installed drawio; then
-        print_skip "draw.io"
-        return 0
-    fi
-
-    local drawio_deb
-    drawio_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "drawio*.deb" 2>/dev/null | head -n1)
-
-    if [[ -z "${drawio_deb}" ]]; then
-        print_warning "draw.io .deb not found in ${SETUP_ARTIFACTS_DIR}"
-        print_warning "Download from https://github.com/jgraph/drawio-desktop/releases"
-        return 1
-    fi
-
-    apt_install_deb "${drawio_deb}" "draw.io"
-}
 
 install_flatpaks() {
     print_section "Install Flatpak Apps"
@@ -702,107 +601,6 @@ install_flatpaks() {
     fi
 }
 
-install_jetbrains_toolbox() {
-    print_section "JetBrains Toolbox"
-
-    local apps_dir="${HOME}/Apps"
-    local install_dir="${apps_dir}/jetbrains-toolbox"
-    local toolbox_binary="${install_dir}/bin/jetbrains-toolbox"
-
-    # Check if already installed
-    if [[ -d "${install_dir}" ]] || command_exists jetbrains-toolbox; then
-        print_skip "JetBrains Toolbox"
-        return 0
-    fi
-
-    local toolbox_archive
-    toolbox_archive=$(find "${SETUP_ARTIFACTS_DIR}" -name "jetbrains-toolbox-*.tar.gz" 2>/dev/null | head -n1)
-
-    if [[ -z "${toolbox_archive}" ]]; then
-        print_warning "JetBrains Toolbox archive not found in ${SETUP_ARTIFACTS_DIR}"
-        print_warning "Download from https://www.jetbrains.com/toolbox-app/"
-        return 1
-    fi
-
-    # Install dependencies (idempotent via apt_install)
-    print_status "Checking JetBrains Toolbox dependencies..."
-    apt_install libfuse2 libxi6 libxrender1 libxtst6 mesa-utils libfontconfig libgtk-3-bin tar dbus-user-session
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Extract JetBrains Toolbox to ${install_dir} and add to PATH"
-        return 0
-    fi
-
-    # Create Apps directory if it doesn't exist
-    if [[ ! -d "${apps_dir}" ]]; then
-        print_status "Creating ${apps_dir} directory..."
-        mkdir -p "${apps_dir}"
-    fi
-
-    # Extract the archive directly to the install location
-    print_status "Extracting JetBrains Toolbox to ${install_dir}..."
-    mkdir -p "${install_dir}"
-    tar -xzf "${toolbox_archive}" -C "${install_dir}" --strip-components=1
-
-    # Add to PATH in .bashrc if not already present
-    local path_entry="export PATH=\"\${HOME}/Apps/jetbrains-toolbox/bin:\${PATH}\""
-    local bashrc="${HOME}/.bashrc"
-
-    if ! grep -qF "Apps/jetbrains-toolbox/bin" "${bashrc}" 2>/dev/null; then
-        print_status "Adding JetBrains Toolbox to PATH in .bashrc..."
-        echo "" >> "${bashrc}"
-        echo "# JetBrains Toolbox" >> "${bashrc}"
-        echo "${path_entry}" >> "${bashrc}"
-        print_success "Added JetBrains Toolbox to PATH"
-    else
-        print_skip "JetBrains Toolbox PATH entry"
-    fi
-
-    print_status "Launching JetBrains Toolbox..."
-    "${toolbox_binary}" &
-    local toolbox_pid=$!
-    print_status "JetBrains Toolbox started with PID: ${toolbox_pid}"
-
-    # Wait 5 seconds before closing
-    sleep 5
-    if kill -0 "${toolbox_pid}" 2>/dev/null; then
-        print_status "Closing JetBrains Toolbox after 5 seconds..."
-        kill "${toolbox_pid}"
-        print_success "JetBrains Toolbox closed"
-    else
-        print_warning "JetBrains Toolbox already exited"
-    fi
-
-    print_success "JetBrains Toolbox installed to ${install_dir}"
-}
-
-install_vmware() {
-    print_section "VMware Workstation"
-
-    # Check if VMware is already installed
-    if command_exists vmware || command_exists vmplayer; then
-        print_skip "VMware"
-        return 0
-    fi
-
-    local vmware_bundle="${SETUP_ARTIFACTS_DIR}/VMware-Workstation-25H2.x86_64.bundle"
-
-    if [[ ! -f "${vmware_bundle}" ]]; then
-        print_warning "VMware installer not found: ${vmware_bundle}"
-        print_warning "Download from https://www.vmware.com/products/workstation-pro.html"
-        return 1
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install VMware from ${vmware_bundle}"
-        return 0
-    fi
-
-    print_status "Installing VMware from ${vmware_bundle}..."
-    chmod +x "${vmware_bundle}"
-    sudo "${vmware_bundle}"
-    print_success "VMware installation completed"
-}
 
 install_jdk() {
     print_section "Java Development Kit (JDK)"
@@ -828,56 +626,6 @@ install_jdk() {
     fi
 }
 
-install_tizen_studio() {
-    print_section "Tizen Studio Web CLI"
-
-    # Check if sdb is already installed (check both PATH and file location)
-    local sdb_path="${HOME}/tizen-studio/tools/sdb"
-    if command_exists sdb || [[ -f "${sdb_path}" ]]; then
-        print_skip "Tizen Studio Web CLI"
-        return 0
-    fi
-
-    # Check for JDK dependency
-    if ! command_exists java || ! command_exists javac; then
-        print_error "JDK is required for Tizen Studio but not found"
-        print_error "Please install JDK first (run install_jdk)"
-        return 1
-    fi
-
-    local tizen_installer="${SETUP_ARTIFACTS_DIR}/web-cli_Tizen_Studio_6.1_ubuntu-64.bin"
-
-    if [[ ! -f "${tizen_installer}" ]]; then
-        print_warning "Tizen Studio installer not found: ${tizen_installer}"
-        print_warning "Download from https://developer.tizen.org/development/tizen-studio/download"
-        return 1
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Tizen Studio from ${tizen_installer}"
-        print_dry_run "Add Tizen Studio sdb to PATH in .bashrc"
-        return 0
-    fi
-
-    print_status "Installing Tizen Studio Web CLI from ${tizen_installer}..."
-    chmod +x "${tizen_installer}"
-    "${tizen_installer}"
-    print_success "Tizen Studio installation completed"
-
-    # Add sdb to PATH in .bashrc if not already present
-    local path_entry="export PATH=\"\${HOME}/tizen-studio/tools:\${PATH}\""
-    local bashrc="${HOME}/.bashrc"
-
-    if ! grep -qF "tizen-studio/tools" "${bashrc}" 2>/dev/null; then
-        print_status "Adding Tizen Studio sdb to PATH in .bashrc..."
-        echo "" >> "${bashrc}"
-        echo "# Tizen Studio" >> "${bashrc}"
-        echo "${path_entry}" >> "${bashrc}"
-        print_success "Added Tizen Studio sdb to PATH"
-    else
-        print_skip "Tizen Studio PATH entry"
-    fi
-}
 
 install_git() {
     print_section "Git"
@@ -1137,113 +885,73 @@ install_bun() {
 }
 
 install_docker() {
-    print_section "Docker & Docker Desktop"
-
-    local docker_installed=false
-    local docker_desktop_installed=false
+    print_section "Docker Engine"
 
     # Check if Docker is already installed
     if command_exists docker; then
         local docker_version
         docker_version=$(docker --version | awk '{print $3}' | sed 's/,//')
         print_skip "Docker Engine (version ${docker_version})"
-        docker_installed=true
-    fi
-
-    # Check if Docker Desktop is already installed
-    if command_exists docker-desktop || package_installed docker-desktop; then
-        print_skip "Docker Desktop"
-        docker_desktop_installed=true
-    fi
-
-    # If both are installed, we're done
-    if [[ "${docker_installed}" == true ]] && [[ "${docker_desktop_installed}" == true ]]; then
         return 0
     fi
 
-    # Install Docker Engine if not present
-    if [[ "${docker_installed}" == false ]]; then
-        local keyring="/usr/share/keyrings/docker-archive-keyring.gpg"
-        local sources_file="/etc/apt/sources.list.d/docker.list"
+    local keyring="/usr/share/keyrings/docker-archive-keyring.gpg"
+    local sources_file="/etc/apt/sources.list.d/docker.list"
 
-        if [[ "${DRY_RUN}" == true ]]; then
-            print_dry_run "Install Docker Engine (add GPG key, repo, and install packages)"
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Docker Engine (add GPG key, repo, and install packages)"
+    else
+        # Add Docker's official GPG key if not present
+        if ! gpg_key_exists "${keyring}"; then
+            print_status "Adding Docker GPG key..."
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+                sudo gpg --dearmor --output "${keyring}"
+            print_success "Docker GPG key added"
         else
-            # Add Docker's official GPG key if not present
-            if ! gpg_key_exists "${keyring}"; then
-                print_status "Adding Docker GPG key..."
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-                    sudo gpg --dearmor --output "${keyring}"
-                print_success "Docker GPG key added"
-            else
-                print_skip "Docker GPG key"
-            fi
-
-            # Add Docker repository if not present
-            if [[ ! -f "${sources_file}" ]]; then
-                print_status "Adding Docker repository..."
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
-                    sudo tee "${sources_file}" > /dev/null
-                print_success "Docker repository added"
-            else
-                print_skip "Docker repository"
-            fi
-
-            apt_update
+            print_skip "Docker GPG key"
         fi
 
-        # Install Docker Engine packages
-        apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-        if [[ "${DRY_RUN}" != true ]]; then
-            # Add current user to docker group
-            if groups "${USER}" | grep -qw docker; then
-                print_skip "User '${USER}' in docker group"
-            else
-                print_status "Adding user '${USER}' to docker group..."
-                sudo usermod -aG docker "${USER}"
-                print_success "User added to docker group"
-                print_warning "You'll need to log out and back in for group changes to take effect"
-            fi
-
-            # Start and enable Docker service
-            if systemctl is-active --quiet docker; then
-                print_skip "Docker service (already running)"
-            else
-                print_status "Starting Docker service..."
-                sudo systemctl start docker
-                sudo systemctl enable docker
-                print_success "Docker service started and enabled"
-            fi
+        # Add Docker repository if not present
+        if [[ ! -f "${sources_file}" ]]; then
+            print_status "Adding Docker repository..."
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+                sudo tee "${sources_file}" > /dev/null
+            print_success "Docker repository added"
+        else
+            print_skip "Docker repository"
         fi
+
+        apt_update
     fi
 
-    # Install Docker Desktop if not present
-    if [[ "${docker_desktop_installed}" == false ]]; then
-        local docker_desktop_deb
-        docker_desktop_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "docker-desktop*.deb" 2>/dev/null | head -n1)
+    # Install Docker Engine packages
+    apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-        if [[ -z "${docker_desktop_deb}" ]]; then
-            print_warning "Docker Desktop .deb not found in ${SETUP_ARTIFACTS_DIR}"
-            print_warning "Download from https://docs.docker.com/desktop/install/ubuntu/"
-            return 1
+    if [[ "${DRY_RUN}" != true ]]; then
+        # Add current user to docker group
+        if groups "${USER}" | grep -qw docker; then
+            print_skip "User '${USER}' in docker group"
+        else
+            print_status "Adding user '${USER}' to docker group..."
+            sudo usermod -aG docker "${USER}"
+            print_success "User added to docker group"
+            print_warning "You'll need to log out and back in for group changes to take effect"
         fi
 
-        # Install Docker Desktop dependencies first
-        apt_install pass gnome-keyring
+        # Start and enable Docker service
+        if systemctl is-active --quiet docker; then
+            print_skip "Docker service (already running)"
+        else
+            print_status "Starting Docker service..."
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            print_success "Docker service started and enabled"
+        fi
 
-        apt_install_deb "${docker_desktop_deb}" "Docker Desktop"
-    fi
-
-    if [[ "${docker_installed}" == false ]] && [[ "${DRY_RUN}" != true ]]; then
         echo ""
         print_success "Docker installation complete!"
         print_status "Docker version: $(docker --version 2>/dev/null || echo 'N/A')"
         print_status "Docker Compose version: $(docker compose version 2>/dev/null || echo 'N/A')"
-        
-        if [[ "${docker_desktop_installed}" == false ]]; then
-            print_status "Docker Desktop can be launched from your applications menu"
-        fi
     fi
 }
 
@@ -1487,47 +1195,6 @@ install_spotify() {
     apt_install spotify-client
 }
 
-install_zoom() {
-    print_section "Zoom Video Conferencing"
-
-    # Check if Zoom is already installed
-    if command_exists zoom || package_installed zoom; then
-        print_skip "Zoom"
-        return 0
-    fi
-
-    local zoom_deb
-    zoom_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "zoom*.deb" 2>/dev/null | head -n1)
-
-    if [[ -z "${zoom_deb}" ]]; then
-        print_warning "Zoom .deb not found in ${SETUP_ARTIFACTS_DIR}"
-        print_warning "Download from https://zoom.us/download?os=linux"
-        return 1
-    fi
-
-    apt_install_deb "${zoom_deb}" "Zoom"
-}
-
-install_protonmail() {
-    print_section "Proton Mail Desktop"
-
-    # Check if Proton Mail is already installed
-    if command_exists proton-mail || package_installed proton-mail; then
-        print_skip "Proton Mail"
-        return 0
-    fi
-
-    local protonmail_deb
-    protonmail_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "ProtonMail*.deb" -o -name "protonmail*.deb" 2>/dev/null | head -n1)
-
-    if [[ -z "${protonmail_deb}" ]]; then
-        print_warning "Proton Mail .deb not found in ${SETUP_ARTIFACTS_DIR}"
-        print_warning "Download from https://proton.me/mail/download"
-        return 1
-    fi
-
-    apt_install_deb "${protonmail_deb}" "Proton Mail"
-}
 
 install_gimp() {
     print_section "GIMP Image Editor"
@@ -1540,26 +1207,6 @@ install_gimp() {
     apt_install gimp
 }
 
-install_steam() {
-    print_section "Steam"
-
-    # Check if Steam is already installed
-    if command_exists steam || package_installed steam-launcher; then
-        print_skip "Steam"
-        return 0
-    fi
-
-    local steam_deb
-    steam_deb=$(find "${SETUP_ARTIFACTS_DIR}" -name "steam*.deb" 2>/dev/null | head -n1)
-
-    if [[ -z "${steam_deb}" ]]; then
-        print_warning "Steam .deb not found in ${SETUP_ARTIFACTS_DIR}"
-        print_warning "Download from https://store.steampowered.com/about/"
-        return 1
-    fi
-
-    apt_install_deb "${steam_deb}" "Steam"
-}
 
 install_gitkraken() {
     print_section "GitKraken Desktop"
@@ -1762,7 +1409,6 @@ main() {
     fi
 
     print_status "Log file: ${LOG_FILE}"
-    print_status "Setup artifacts directory: ${SETUP_ARTIFACTS_DIR}"
     echo ""
 
     # Verify we have necessary permissions (skip in dry run)
@@ -1779,9 +1425,6 @@ main() {
             kill -0 "$$" || exit
         done 2>/dev/null &
     fi
-
-    # Create artifacts directory if it doesn't exist
-    mkdir -p "${SETUP_ARTIFACTS_DIR}"
 
     # Ensure curl is installed (required for various setup operations)
     if ! command_exists curl; then
@@ -1814,23 +1457,14 @@ main() {
     install_brave
     install_google_chrome
     install_chromium
-    install_slack
-    install_cursor
-    install_drawio
     install_1password
     install_flatpaks
-    install_jetbrains_toolbox
-    install_vmware
     install_jdk
-    install_tizen_studio
     install_twingate
     install_desktop_settings
     install_ffmpeg
     install_spotify
-    install_zoom
-    install_protonmail
     install_gimp
-    install_steam
     install_gitkraken
     install_claude_code
     install_go
