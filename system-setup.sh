@@ -224,8 +224,16 @@ apt_update() {
         return 0
     fi
     print_status "Updating package lists..."
-    sudo apt update -qq
-    print_success "Package lists updated"
+    local apt_output
+    if apt_output=$(sudo apt update -qq 2>&1); then
+        print_success "Package lists updated"
+    else
+        local exit_code=$?
+        log "ERROR" "apt update output: ${apt_output}"
+        print_error "apt update failed (exit code ${exit_code}). Output:"
+        echo "${apt_output}" >&2
+        return ${exit_code}
+    fi
 }
 
 apt_upgrade() {
@@ -234,8 +242,16 @@ apt_upgrade() {
         return 0
     fi
     print_status "Upgrading installed packages..."
-    sudo apt upgrade -y
-    print_success "Packages upgraded"
+    local apt_output
+    if apt_output=$(sudo apt upgrade -y 2>&1); then
+        print_success "Packages upgraded"
+    else
+        local exit_code=$?
+        log "ERROR" "apt upgrade output: ${apt_output}"
+        print_error "apt upgrade failed (exit code ${exit_code}). Output:"
+        echo "${apt_output}" >&2
+        return ${exit_code}
+    fi
 }
 
 apt_install() {
@@ -259,8 +275,16 @@ apt_install() {
     fi
 
     print_status "Installing packages: ${packages_to_install[*]}"
-    sudo apt install -y "${packages_to_install[@]}"
-    print_success "Packages installed: ${packages_to_install[*]}"
+    local apt_output
+    if apt_output=$(sudo apt install -y "${packages_to_install[@]}" 2>&1); then
+        print_success "Packages installed: ${packages_to_install[*]}"
+    else
+        local exit_code=$?
+        log "ERROR" "apt install output: ${apt_output}"
+        print_error "apt install failed for ${packages_to_install[*]} (exit code ${exit_code}). Output:"
+        echo "${apt_output}" >&2
+        return ${exit_code}
+    fi
 }
 
 apt_install_deb() {
@@ -286,8 +310,16 @@ apt_install_deb() {
     fi
 
     print_status "Installing ${package_name} from .deb file..."
-    sudo apt install -y "${deb_file}"
-    print_success "${package_name} installed"
+    local apt_output
+    if apt_output=$(sudo apt install -y "${deb_file}" 2>&1); then
+        print_success "${package_name} installed"
+    else
+        local exit_code=$?
+        log "ERROR" "apt install deb output: ${apt_output}"
+        print_error "Failed to install ${package_name} (exit code ${exit_code}). Output:"
+        echo "${apt_output}" >&2
+        return ${exit_code}
+    fi
 }
 
 flatpak_install() {
@@ -1529,6 +1561,145 @@ install_steam() {
     apt_install_deb "${steam_deb}" "Steam"
 }
 
+install_gitkraken() {
+    print_section "GitKraken Desktop"
+
+    if command_exists gitkraken || package_installed gitkraken; then
+        print_skip "GitKraken"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Download and install GitKraken .deb from release.gitkraken.com"
+        return 0
+    fi
+
+    local gitkraken_deb="/tmp/gitkraken-amd64.deb"
+
+    print_status "Downloading GitKraken..."
+    curl -fsSL -o "${gitkraken_deb}" https://release.gitkraken.com/linux/gitkraken-amd64.deb
+    print_success "GitKraken downloaded"
+
+    print_status "Installing GitKraken..."
+    sudo apt install -y "${gitkraken_deb}"
+    rm -f "${gitkraken_deb}"
+    print_success "GitKraken installed"
+}
+
+install_claude_code() {
+    print_section "Claude Code CLI"
+
+    if command_exists claude; then
+        local claude_version
+        claude_version=$(claude --version 2>/dev/null || echo "unknown")
+        print_skip "Claude Code CLI (${claude_version})"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Claude Code CLI via npm (npm install -g @anthropic-ai/claude-code)"
+        return 0
+    fi
+
+    if ! command_exists npm; then
+        print_warning "npm not available, skipping Claude Code CLI"
+        print_warning "Install Node.js/npm first, then run: npm install -g @anthropic-ai/claude-code"
+        return 1
+    fi
+
+    print_status "Installing Claude Code CLI..."
+    sudo npm install -g @anthropic-ai/claude-code
+    print_success "Claude Code CLI installed"
+}
+
+install_go() {
+    print_section "Go Programming Language"
+
+    if command_exists go; then
+        local go_version
+        go_version=$(go version | awk '{print $3}')
+        print_skip "Go (${go_version})"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Go via apt"
+        return 0
+    fi
+
+    apt_install golang-go
+
+    if command_exists go; then
+        local go_version
+        go_version=$(go version | awk '{print $3}')
+        print_success "Go installed (${go_version})"
+    else
+        print_warning "Go installation completed but go not found in PATH"
+    fi
+}
+
+install_vlc() {
+    print_section "VLC Media Player"
+
+    if flatpak_installed "org.videolan.VLC"; then
+        print_skip "VLC"
+        return 0
+    fi
+
+    if [[ "${INSTALL_FLATPAK}" != true ]]; then
+        print_warning "Skipping VLC (Flatpak disabled)"
+        return 0
+    fi
+
+    if ! command_exists flatpak; then
+        print_warning "Flatpak not available, skipping VLC"
+        return 0
+    fi
+
+    flatpak_install "org.videolan.VLC" "VLC Media Player"
+}
+
+install_ngrok() {
+    print_section "ngrok CLI"
+
+    if command_exists ngrok || package_installed ngrok; then
+        print_skip "ngrok"
+        return 0
+    fi
+
+    local keyring="/etc/apt/keyrings/ngrok.gpg"
+    local sources_file="/etc/apt/sources.list.d/ngrok.list"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install ngrok (add GPG key, repo, and install package)"
+        return 0
+    fi
+
+    # Add GPG key if not present
+    if ! gpg_key_exists "${keyring}"; then
+        print_status "Adding ngrok GPG key..."
+        sudo mkdir -p /etc/apt/keyrings
+        curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | \
+            sudo gpg --dearmor -o "${keyring}"
+        print_success "GPG key added"
+    else
+        print_skip "ngrok GPG key"
+    fi
+
+    # Add repository if not present
+    if [[ ! -f "${sources_file}" ]]; then
+        print_status "Adding ngrok repository..."
+        echo "deb [signed-by=${keyring}] https://ngrok-agent.s3.amazonaws.com buster main" | \
+            sudo tee "${sources_file}" > /dev/null
+        print_success "Repository added"
+    else
+        print_skip "ngrok repository"
+    fi
+
+    apt_update
+    apt_install ngrok
+}
+
 # =============================================================================
 # Main Execution
 # =============================================================================
@@ -1660,6 +1831,11 @@ main() {
     install_protonmail
     install_gimp
     install_steam
+    install_gitkraken
+    install_claude_code
+    install_go
+    install_vlc
+    install_ngrok
 
     # Cleanup
     print_section "System Cleanup"
