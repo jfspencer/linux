@@ -4,13 +4,13 @@
 # Configures a fresh Ubuntu/Pop!_OS installation with common development tools
 #
 # Usage: ./system-setup.sh [OPTIONS]
-#   --force-system76     Force System76 driver installation (auto-detected by default)
-#   --skip-system76      Skip System76 driver installation even if detected
-#   --skip-system76-nvidia        Skip NVIDIA driver installation
-#   --skip-flatpak       Skip Flatpak and GNOME Circle apps
-#   --skip-reboot-pause  Skip the reboot pause after Flatpak setup
-#   --dry-run            Show what would be installed without making changes
-#   --help               Show this help message
+#   --force-system76          Force System76 driver installation (auto-detected by default)
+#   --skip-system76           Skip System76 driver installation even if detected
+#   --skip-system76-nvidia    Skip NVIDIA driver installation
+#   --skip-flatpak            Skip Flatpak and GNOME Circle apps
+#   --skip-reboot-pause       Skip the reboot pause after Flatpak setup
+#   --dry-run                 Show what would be installed without making changes
+#   --help                    Show this help message
 #
 
 set -euo pipefail
@@ -29,11 +29,64 @@ INSTALL_FLATPAK=true
 PAUSE_FOR_REBOOT=true
 DRY_RUN=false
 
+# Configurable versions and values
+readonly TARGET_NODE_VERSION="20.19.5"
+readonly TWINGATE_NETWORK="angelstudios"
+
 # =============================================================================
-# Application Lists
+# Application Lists (edit these to customize your installation)
 # =============================================================================
 
-# Flatpak applications to install
+# Signed-repo apps: "label|gpg_url|keyring|sources_file|repo_line|packages"
+#
+# Placeholders expanded at runtime:
+#   {ARCH}     = $(dpkg --print-architecture)
+#   {CODENAME} = $(lsb_release -cs)
+#   {KEYRING}  = the keyring path from this entry
+#
+# Apps in SIMPLE_SIGNED_REPO_APPS are installed automatically with no extra
+# logic. Others have dedicated install functions for post-install steps.
+readonly SIGNED_REPO_APPS=(
+    # Browsers
+    "Google Chrome|https://dl.google.com/linux/linux_signing_key.pub|/usr/share/keyrings/google-chrome-keyring.gpg|/etc/apt/sources.list.d/google-chrome.list|deb [arch={ARCH} signed-by={KEYRING}] https://dl.google.com/linux/chrome/deb/ stable main|google-chrome-stable"
+    # Version control
+    "GitHub Desktop|https://mirror.mwt.me/shiftkey-desktop/gpgkey|/usr/share/keyrings/mwt-desktop.gpg|/etc/apt/sources.list.d/mwt-desktop.list|deb [arch={ARCH} signed-by={KEYRING}] https://mirror.mwt.me/shiftkey-desktop/deb/ any main|github-desktop"
+    # Containers (post-install: usermod, systemctl)
+    "Docker|https://download.docker.com/linux/ubuntu/gpg|/usr/share/keyrings/docker-archive-keyring.gpg|/etc/apt/sources.list.d/docker.list|deb [arch={ARCH} signed-by={KEYRING}] https://download.docker.com/linux/ubuntu {CODENAME} stable|docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+    # VPN (post-install: setup message)
+    "Twingate|https://packages.twingate.com/apt/gpg.key|/usr/share/keyrings/twingate-client-keyring.gpg|/etc/apt/sources.list.d/twingate.list|deb [signed-by={KEYRING}] https://packages.twingate.com/apt/ * *|twingate"
+    # Media
+    "Spotify|https://download.spotify.com/debian/pubkey_5384CE82BA52C83A.asc|/usr/share/keyrings/spotify-archive-keyring.gpg|/etc/apt/sources.list.d/spotify.list|deb [signed-by={KEYRING}] https://repository.spotify.com stable non-free|spotify-client"
+    # Security (post-install: debsig verification)
+    "1Password|https://downloads.1password.com/linux/keys/1password.asc|/usr/share/keyrings/1password-archive-keyring.gpg|/etc/apt/sources.list.d/1password.list|deb [arch={ARCH} signed-by={KEYRING}] https://downloads.1password.com/linux/debian/{ARCH} stable main|1password"
+    # Databases (post-install: systemctl)
+    "PostgreSQL|https://www.postgresql.org/media/keys/ACCC4CF8.asc|/usr/share/keyrings/pgdg-archive-keyring.gpg|/etc/apt/sources.list.d/pgdg.list|deb [signed-by={KEYRING}] https://apt.postgresql.org/pub/repos/apt {CODENAME}-pgdg main|postgresql postgresql-contrib"
+    # Databases
+    "pgAdmin 4|https://www.pgadmin.org/static/packages_pgadmin_org.pub|/usr/share/keyrings/pgadmin4-archive-keyring.gpg|/etc/apt/sources.list.d/pgadmin4.list|deb [signed-by={KEYRING}] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/{CODENAME} pgadmin4 main|pgadmin4-desktop"
+    # Dev tools
+    "ngrok|https://ngrok-agent.s3.amazonaws.com/ngrok.asc|/usr/share/keyrings/ngrok-archive-keyring.gpg|/etc/apt/sources.list.d/ngrok.list|deb [signed-by={KEYRING}] https://ngrok-agent.s3.amazonaws.com buster main|ngrok"
+)
+
+# Labels of SIGNED_REPO_APPS entries that need no post-install hooks.
+# These are installed automatically by install_signed_repo_apps().
+readonly SIMPLE_SIGNED_REPO_APPS=(
+    "Google Chrome"
+    "GitHub Desktop"
+    "Spotify"
+    "pgAdmin 4"
+    "ngrok"
+)
+
+# Simple APT packages (default repos, no custom repo needed):
+# "command_name|package_name|display_name"
+readonly SIMPLE_APT_APPS=(
+    "chromium-browser|chromium-browser|Chromium Browser"
+    "ffmpeg|ffmpeg|FFmpeg"
+    "gimp|gimp|GIMP Image Editor"
+    "go|golang-go|Go Programming Language"
+)
+
+# Flatpak applications: "app.id|Display Name"
 readonly FLATPAK_APPS=(
     "org.gnome.World.PikaBackup|Pika Backup"
     "io.github.fizzyizzy05.binary|Binary"
@@ -59,9 +112,10 @@ readonly FLATPAK_APPS=(
     "us.zoom.Zoom|Zoom"
     "me.proton.Mail|Proton Mail"
     "com.valvesoftware.Steam|Steam"
+    "org.videolan.VLC|VLC Media Player"
 )
 
-# NPM global packages to install
+# NPM global packages
 readonly NPM_PACKAGES=(
     "@webos-tools/cli"
     "pnpm"
@@ -131,8 +185,15 @@ print_section() {
 # Error Handling
 # =============================================================================
 
+SUDO_KEEPALIVE_PID=""
+
 cleanup() {
     local exit_code=$?
+    # Kill sudo keepalive background process
+    if [[ -n "${SUDO_KEEPALIVE_PID}" ]]; then
+        kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null || true
+        wait "${SUDO_KEEPALIVE_PID}" 2>/dev/null || true
+    fi
     if [[ ${exit_code} -ne 0 ]]; then
         print_error "Script failed with exit code ${exit_code}"
         print_error "Check log file for details: ${LOG_FILE}"
@@ -184,7 +245,6 @@ gpg_key_exists() {
 }
 
 is_system76_hardware() {
-    # Check sysfs for System76 identification (instant, no sudo needed)
     [[ -f /sys/class/dmi/id/sys_vendor ]] && grep -qi "system76" /sys/class/dmi/id/sys_vendor 2>/dev/null
 }
 
@@ -310,7 +370,6 @@ add_apt_repository() {
     local ppa_name="$2"
     local description="${3:-repository}"
 
-    # Extract PPA identifier for checking (e.g., "system76-dev/stable" from "ppa:system76-dev/stable")
     local ppa_id="${repo#ppa:}"
 
     if ppa_exists "${ppa_id}"; then
@@ -329,13 +388,92 @@ add_apt_repository() {
 }
 
 # =============================================================================
-# Installation Functions (Idempotent)
+# Signed Repository Helper Functions
+# =============================================================================
+
+NEEDS_APT_UPDATE=false
+
+apt_update_if_needed() {
+    if [[ "${NEEDS_APT_UPDATE}" == true ]]; then
+        apt_update
+        NEEDS_APT_UPDATE=false
+    fi
+}
+
+# add_signed_repo LABEL GPG_URL KEYRING SOURCES_FILE REPO_LINE
+#
+# Idempotently adds a GPG key and apt sources file for a signed repository.
+# Sets NEEDS_APT_UPDATE=true if a new repo was added.
+add_signed_repo() {
+    local label="$1"
+    local gpg_url="$2"
+    local keyring="$3"
+    local sources_file="$4"
+    local repo_line="$5"
+
+    # Expand placeholders
+    local arch codename
+    arch="$(dpkg --print-architecture)"
+    codename="$(lsb_release -cs)"
+    repo_line="${repo_line//\{ARCH\}/${arch}}"
+    repo_line="${repo_line//\{CODENAME\}/${codename}}"
+    repo_line="${repo_line//\{KEYRING\}/${keyring}}"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Add ${label} GPG key and repository"
+        return 0
+    fi
+
+    # Ensure keyring parent directory exists
+    local keyring_dir
+    keyring_dir="$(dirname "${keyring}")"
+    if [[ ! -d "${keyring_dir}" ]]; then
+        sudo mkdir -p "${keyring_dir}"
+    fi
+
+    # Add GPG key if not present
+    if ! gpg_key_exists "${keyring}"; then
+        print_status "Adding ${label} GPG key..."
+        curl -fsSL "${gpg_url}" | sudo gpg --dearmor --yes --output "${keyring}"
+        print_success "${label} GPG key added"
+    else
+        print_skip "${label} GPG key"
+    fi
+
+    # Add repository if not present
+    if [[ ! -f "${sources_file}" ]]; then
+        print_status "Adding ${label} repository..."
+        echo "${repo_line}" | sudo tee "${sources_file}" > /dev/null
+        print_success "${label} repository added"
+        NEEDS_APT_UPDATE=true
+    else
+        print_skip "${label} repository"
+    fi
+}
+
+# Looks up a SIGNED_REPO_APPS entry by label and calls add_signed_repo().
+add_signed_repo_by_name() {
+    local target_label="$1"
+    local entry
+    for entry in "${SIGNED_REPO_APPS[@]}"; do
+        if [[ "${entry%%|*}" == "${target_label}" ]]; then
+            local label gpg_url keyring sources_file repo_line packages
+            IFS='|' read -r label gpg_url keyring sources_file repo_line packages <<< "${entry}"
+            add_signed_repo "${label}" "${gpg_url}" "${keyring}" "${sources_file}" "${repo_line}"
+            return $?
+        fi
+    done
+    print_error "No SIGNED_REPO_APPS entry found for: ${target_label}"
+    return 1
+}
+
+# =============================================================================
+# Installation Functions
 # =============================================================================
 
 install_system76_drivers() {
     print_section "System76 Drivers"
 
-    # Handle auto-detection
     if [[ "${INSTALL_SYSTEM76}" == "auto" ]]; then
         print_status "Checking for System76 hardware..."
         if is_system76_hardware; then
@@ -370,7 +508,7 @@ install_system76_drivers() {
     fi
 }
 
-install_flatpak() {
+setup_flatpak() {
     print_section "Flatpak Setup"
 
     if [[ "${INSTALL_FLATPAK}" != true ]]; then
@@ -378,7 +516,6 @@ install_flatpak() {
         return 0
     fi
 
-    # Check if flatpak is already installed and configured
     local flatpak_needs_install=false
     local flathub_needs_add=false
 
@@ -394,15 +531,12 @@ install_flatpak() {
         flathub_needs_add=true
     fi
 
-    # Install flatpak if needed
     if [[ "${flatpak_needs_install}" == true ]]; then
         apt_install flatpak gnome-software-plugin-flatpak
     else
-        # Still check gnome-software-plugin-flatpak
         apt_install gnome-software-plugin-flatpak
     fi
 
-    # Add flathub if needed
     if [[ "${flathub_needs_add}" == true ]]; then
         if [[ "${DRY_RUN}" == true ]]; then
             print_dry_run "flatpak remote-add flathub"
@@ -413,7 +547,6 @@ install_flatpak() {
         fi
     fi
 
-    # Only pause if we actually installed flatpak for the first time
     if [[ "${flatpak_needs_install}" == true ]] && [[ "${PAUSE_FOR_REBOOT}" == true ]] && [[ "${DRY_RUN}" != true ]]; then
         echo ""
         print_warning "Flatpak was just installed. A system restart is recommended."
@@ -442,190 +575,13 @@ install_brave() {
     fi
 
     print_status "Installing Brave browser..."
-    curl -fsS https://dl.brave.com/install.sh | sh
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+    curl -fsSL -o "${tmp_installer}" https://dl.brave.com/install.sh
+    sh "${tmp_installer}"
+    rm -f "${tmp_installer}"
     print_success "Brave browser installed"
 }
-
-install_google_chrome() {
-    print_section "Google Chrome"
-
-    if command_exists google-chrome || package_installed google-chrome-stable; then
-        print_skip "Google Chrome"
-        return 0
-    fi
-
-    local keyring="/usr/share/keyrings/google-chrome-keyring.gpg"
-    local sources_file="/etc/apt/sources.list.d/google-chrome.list"
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Google Chrome (add GPG key, repo, and install package)"
-        return 0
-    fi
-
-    # Add GPG key if not present
-    if ! gpg_key_exists "${keyring}"; then
-        print_status "Adding Google Chrome GPG key..."
-        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | \
-            sudo gpg --dearmor --output "${keyring}"
-        print_success "GPG key added"
-    else
-        print_skip "Google Chrome GPG key"
-    fi
-
-    # Add repository if not present
-    if [[ ! -f "${sources_file}" ]]; then
-        print_status "Adding Google Chrome repository..."
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://dl.google.com/linux/chrome/deb/ stable main" | \
-            sudo tee "${sources_file}" > /dev/null
-        print_success "Repository added"
-    else
-        print_skip "Google Chrome repository"
-    fi
-
-    apt_update
-    apt_install google-chrome-stable
-}
-
-install_chromium() {
-    print_section "Chromium Browser"
-
-    if command_exists chromium-browser || command_exists chromium || package_installed chromium-browser; then
-        print_skip "Chromium browser"
-        return 0
-    fi
-
-    apt_install chromium-browser
-}
-
-
-install_1password() {
-    print_section "1Password"
-
-    if package_installed 1password; then
-        print_skip "1Password"
-        return 0
-    fi
-
-    local keyring="/usr/share/keyrings/1password-archive-keyring.gpg"
-    local sources_file="/etc/apt/sources.list.d/1password.list"
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install 1Password (add GPG key, repo, and install package)"
-        return 0
-    fi
-
-    # Add GPG key if not present
-    if ! gpg_key_exists "${keyring}"; then
-        print_status "Adding 1Password GPG key..."
-        curl -sS https://downloads.1password.com/linux/keys/1password.asc | \
-            sudo gpg --dearmor --output "${keyring}"
-        print_success "GPG key added"
-    else
-        print_skip "1Password GPG key"
-    fi
-
-    # Add repository if not present
-    if [[ ! -f "${sources_file}" ]]; then
-        print_status "Adding 1Password repository..."
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://downloads.1password.com/linux/debian/$(dpkg --print-architecture) stable main" | \
-            sudo tee "${sources_file}" > /dev/null
-        print_success "Repository added"
-    else
-        print_skip "1Password repository"
-    fi
-
-    # Setup debsig verification
-    local debsig_policy_dir="/etc/debsig/policies/AC2D62742012EA22"
-    local debsig_keyring_dir="/usr/share/debsig/keyrings/AC2D62742012EA22"
-
-    if [[ ! -f "${debsig_policy_dir}/1password.pol" ]]; then
-        print_status "Setting up debsig verification..."
-        sudo mkdir -p "${debsig_policy_dir}"
-        curl -sS https://downloads.1password.com/linux/debian/debsig/1password.pol | \
-            sudo tee "${debsig_policy_dir}/1password.pol" > /dev/null
-        sudo mkdir -p "${debsig_keyring_dir}"
-        curl -sS https://downloads.1password.com/linux/keys/1password.asc | \
-            sudo gpg --dearmor --output "${debsig_keyring_dir}/debsig.gpg"
-        print_success "Debsig verification configured"
-    else
-        print_skip "1Password debsig verification"
-    fi
-
-    apt_update
-    apt_install 1password
-}
-
-
-install_flatpaks() {
-    print_section "Install Flatpak Apps"
-
-    if [[ "${INSTALL_FLATPAK}" != true ]]; then
-        print_warning "Skipping Flatpak apps (Flatpak disabled)"
-        return 0
-    fi
-
-    if ! command_exists flatpak; then
-        print_warning "Flatpak not available, skipping"
-        return 0
-    fi
-
-    local failed_apps=()
-    local installed_count=0
-    local skipped_count=0
-
-    for app_entry in "${FLATPAK_APPS[@]}"; do
-        local app_id="${app_entry%%|*}"
-        local app_name="${app_entry##*|}"
-
-        if flatpak_installed "${app_id}"; then
-            print_skip "${app_name}"
-            # Use assignment form to avoid set -e exit on zero increment
-            skipped_count=$((skipped_count + 1))
-        elif flatpak_install "${app_id}" "${app_name}"; then
-            installed_count=$((installed_count + 1))
-        else
-            failed_apps+=("${app_name}")
-            log "ERROR" "Failed to install flatpak: ${app_id} (${app_name})"
-        fi
-    done
-
-    echo ""
-    if [[ ${installed_count} -gt 0 ]]; then
-        print_success "Newly installed: ${installed_count} apps"
-    fi
-    if [[ ${skipped_count} -gt 0 ]]; then
-        print_status "Already installed: ${skipped_count} apps"
-    fi
-    if [[ ${#failed_apps[@]} -gt 0 ]]; then
-        print_warning "Failed to install: ${failed_apps[*]}"
-    fi
-}
-
-
-install_jdk() {
-    print_section "Java Development Kit (JDK)"
-
-    # Check if java and javac are already installed
-    if command_exists java && command_exists javac; then
-        local java_version
-        java_version=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
-        print_skip "JDK (Java ${java_version})"
-        return 0
-    fi
-
-    # Install OpenJDK (using default JDK package)
-    apt_install default-jdk
-
-    # Verify installation
-    if command_exists java && command_exists javac; then
-        local java_version
-        java_version=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
-        print_success "JDK installed (Java ${java_version})"
-    else
-        print_warning "JDK installation completed but java/javac not found in PATH"
-    fi
-}
-
 
 install_git() {
     print_section "Git"
@@ -650,10 +606,8 @@ install_git_lfs() {
         return 0
     fi
 
-    # Install git-lfs package
     apt_install git-lfs
 
-    # Initialize git-lfs for the user
     if [[ "${DRY_RUN}" == true ]]; then
         print_dry_run "git lfs install"
         return 0
@@ -668,101 +622,80 @@ install_git_lfs() {
     fi
 }
 
-install_github_desktop() {
-    print_section "GitHub Desktop"
+install_gitkraken() {
+    print_section "GitKraken Desktop"
 
-    if command_exists github-desktop || package_installed github-desktop; then
-        print_skip "GitHub Desktop"
+    if command_exists gitkraken || package_installed gitkraken; then
+        print_skip "GitKraken"
         return 0
     fi
-
-    local keyring="/usr/share/keyrings/mwt-desktop.gpg"
-    local sources_file="/etc/apt/sources.list.d/mwt-desktop.list"
 
     if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install GitHub Desktop (add GPG key, repo, and install package)"
+        print_dry_run "Download and install GitKraken .deb from release.gitkraken.com"
         return 0
     fi
 
-    # Add GPG key if not present
-    if ! gpg_key_exists "${keyring}"; then
-        print_status "Adding GitHub Desktop GPG key..."
-        wget -qO - https://mirror.mwt.me/shiftkey-desktop/gpgkey | \
-            gpg --dearmor | sudo tee "${keyring}" > /dev/null
-        print_success "GPG key added"
-    else
-        print_skip "GitHub Desktop GPG key"
-    fi
+    local gitkraken_deb
+    gitkraken_deb="$(mktemp --suffix=.deb)"
 
-    # Add repository if not present
-    if [[ ! -f "${sources_file}" ]]; then
-        print_status "Adding GitHub Desktop repository..."
-        sudo sh -c 'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/mwt-desktop.gpg] https://mirror.mwt.me/shiftkey-desktop/deb/ any main" > /etc/apt/sources.list.d/mwt-desktop.list'
-        print_success "Repository added"
-    else
-        print_skip "GitHub Desktop repository"
-    fi
+    print_status "Downloading GitKraken..."
+    curl -fsSL -o "${gitkraken_deb}" https://release.gitkraken.com/linux/gitkraken-amd64.deb
+    print_success "GitKraken downloaded"
 
-    apt_update
-    apt_install github-desktop
+    print_status "Installing GitKraken..."
+    sudo apt install -y "${gitkraken_deb}"
+    rm -f "${gitkraken_deb}"
+    print_success "GitKraken installed"
 }
 
 install_nodejs() {
     print_section "Node.js & npm"
 
-    local target_node_version="20.19.5"
     local skip_install=false
 
-    # Check if node and npm are already installed with correct version
     if command_exists node && command_exists npm; then
-        local node_version
-        local npm_version
+        local node_version npm_version
         node_version=$(node --version | sed 's/^v//')
         npm_version=$(npm --version)
-        
-        if [[ "${node_version}" == "${target_node_version}" ]]; then
+
+        if [[ "${node_version}" == "${TARGET_NODE_VERSION}" ]]; then
             print_skip "Node.js v${node_version} & npm ${npm_version}"
             skip_install=true
         else
-            print_status "Current Node.js version: ${node_version}, target: ${target_node_version}"
+            print_status "Current Node.js version: ${node_version}, target: ${TARGET_NODE_VERSION}"
         fi
     fi
 
     if [[ "${skip_install}" == false ]]; then
-        # Check if NodeSource repository is already added
         local nodesource_list="/etc/apt/sources.list.d/nodesource.list"
-        local needs_repo_setup=false
 
         if [[ ! -f "${nodesource_list}" ]]; then
-            needs_repo_setup=true
-        fi
-
-        if [[ "${needs_repo_setup}" == true ]]; then
             if [[ "${DRY_RUN}" == true ]]; then
                 print_dry_run "Add NodeSource repository and install Node.js (LTS)"
             else
                 print_status "Adding NodeSource repository for Node.js LTS..."
-                curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+                local tmp_installer
+                tmp_installer="$(mktemp)"
+                curl -fsSL -o "${tmp_installer}" https://deb.nodesource.com/setup_lts.x
+                sudo -E bash "${tmp_installer}"
+                rm -f "${tmp_installer}"
                 print_success "NodeSource repository added"
             fi
         else
             print_skip "NodeSource repository"
         fi
 
-        # Install nodejs (npm is included automatically)
         apt_install nodejs
 
-        # Verify npm is available
         if command_exists npm; then
             local npm_version
             npm_version=$(npm --version)
             print_success "npm ${npm_version} installed"
         fi
 
-        # Install 'n' package manager globally
         if [[ "${DRY_RUN}" == true ]]; then
             print_dry_run "npm install -g n"
-            print_dry_run "n ${target_node_version}"
+            print_dry_run "n ${TARGET_NODE_VERSION}"
         else
             if ! command_exists n; then
                 print_status "Installing 'n' Node version manager..."
@@ -772,15 +705,12 @@ install_nodejs() {
                 print_skip "'n' Node version manager"
             fi
 
-            # Use 'n' to install specific Node.js version
-            print_status "Installing Node.js ${target_node_version} using 'n'..."
-            sudo n "${target_node_version}"
-            print_success "Node.js ${target_node_version} installed"
+            print_status "Installing Node.js ${TARGET_NODE_VERSION} using 'n'..."
+            sudo n "${TARGET_NODE_VERSION}"
+            print_success "Node.js ${TARGET_NODE_VERSION} installed"
 
-            # Update PATH for current shell session
             export PATH="/usr/local/bin:${PATH}"
-            
-            # Verify the correct version is now active
+
             if command_exists node; then
                 local new_node_version
                 new_node_version=$(node --version)
@@ -807,7 +737,6 @@ install_npm_packages() {
     local skipped_count=0
 
     for package in "${NPM_PACKAGES[@]}"; do
-        # Check if package is already installed globally
         if npm list -g "${package}" &>/dev/null; then
             print_skip "${package}"
             skipped_count=$((skipped_count + 1))
@@ -834,7 +763,6 @@ install_npm_packages() {
 install_bun() {
     print_section "Bun Runtime"
 
-    # Check if bun is already installed (check both PATH and file location)
     local bun_path="${HOME}/.bun/bin/bun"
     if command_exists bun || [[ -f "${bun_path}" ]]; then
         local bun_version
@@ -854,10 +782,13 @@ install_bun() {
     fi
 
     print_status "Installing Bun runtime..."
-    curl -fsSL https://bun.sh/install | bash
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+    curl -fsSL -o "${tmp_installer}" https://bun.sh/install
+    bash "${tmp_installer}"
+    rm -f "${tmp_installer}"
     print_success "Bun installed"
 
-    # Add bun to PATH in .bashrc if not already present
     local path_entry="export PATH=\"\${HOME}/.bun/bin:\${PATH}\""
     local bashrc="${HOME}/.bashrc"
 
@@ -871,10 +802,8 @@ install_bun() {
         print_skip "Bun PATH entry"
     fi
 
-    # Update PATH for current shell session
     export PATH="${HOME}/.bun/bin:${PATH}"
 
-    # Verify installation
     if command_exists bun; then
         local bun_version
         bun_version=$(bun --version)
@@ -884,353 +813,25 @@ install_bun() {
     fi
 }
 
-install_docker() {
-    print_section "Docker Engine"
+install_jdk() {
+    print_section "Java Development Kit (JDK)"
 
-    # Check if Docker is already installed
-    if command_exists docker; then
-        local docker_version
-        docker_version=$(docker --version | awk '{print $3}' | sed 's/,//')
-        print_skip "Docker Engine (version ${docker_version})"
+    if command_exists java && command_exists javac; then
+        local java_version
+        java_version=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
+        print_skip "JDK (Java ${java_version})"
         return 0
     fi
 
-    local keyring="/usr/share/keyrings/docker-archive-keyring.gpg"
-    local sources_file="/etc/apt/sources.list.d/docker.list"
+    apt_install default-jdk
 
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Docker Engine (add GPG key, repo, and install packages)"
+    if command_exists java && command_exists javac; then
+        local java_version
+        java_version=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}')
+        print_success "JDK installed (Java ${java_version})"
     else
-        # Add Docker's official GPG key if not present
-        if ! gpg_key_exists "${keyring}"; then
-            print_status "Adding Docker GPG key..."
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-                sudo gpg --dearmor --output "${keyring}"
-            print_success "Docker GPG key added"
-        else
-            print_skip "Docker GPG key"
-        fi
-
-        # Add Docker repository if not present
-        if [[ ! -f "${sources_file}" ]]; then
-            print_status "Adding Docker repository..."
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
-                sudo tee "${sources_file}" > /dev/null
-            print_success "Docker repository added"
-        else
-            print_skip "Docker repository"
-        fi
-
-        apt_update
+        print_warning "JDK installation completed but java/javac not found in PATH"
     fi
-
-    # Install Docker Engine packages
-    apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-    if [[ "${DRY_RUN}" != true ]]; then
-        # Add current user to docker group
-        if groups "${USER}" | grep -qw docker; then
-            print_skip "User '${USER}' in docker group"
-        else
-            print_status "Adding user '${USER}' to docker group..."
-            sudo usermod -aG docker "${USER}"
-            print_success "User added to docker group"
-            print_warning "You'll need to log out and back in for group changes to take effect"
-        fi
-
-        # Start and enable Docker service
-        if systemctl is-active --quiet docker; then
-            print_skip "Docker service (already running)"
-        else
-            print_status "Starting Docker service..."
-            sudo systemctl start docker
-            sudo systemctl enable docker
-            print_success "Docker service started and enabled"
-        fi
-
-        echo ""
-        print_success "Docker installation complete!"
-        print_status "Docker version: $(docker --version 2>/dev/null || echo 'N/A')"
-        print_status "Docker Compose version: $(docker compose version 2>/dev/null || echo 'N/A')"
-    fi
-}
-
-install_twingate() {
-    print_section "Twingate VPN Client"
-
-    if command_exists twingate || package_installed twingate; then
-        print_skip "Twingate"
-        return 0
-    fi
-
-    local keyring="/usr/share/keyrings/twingate-client-keyring.gpg"
-    local sources_file="/etc/apt/sources.list.d/twingate.list"
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Twingate (add GPG key, repo, and install package)"
-        return 0
-    fi
-
-    # Ensure required dependencies are installed
-    print_status "Checking Twingate dependencies..."
-    apt_install curl gpg ca-certificates
-
-    # Add GPG key if not present
-    if ! gpg_key_exists "${keyring}"; then
-        print_status "Adding Twingate GPG key..."
-        curl -fsSL https://packages.twingate.com/apt/gpg.key | \
-            sudo gpg --dearmor -o "${keyring}"
-        print_success "GPG key added"
-    else
-        print_skip "Twingate GPG key"
-    fi
-
-    # Add repository if not present
-    if [[ ! -f "${sources_file}" ]]; then
-        print_status "Adding Twingate repository..."
-        echo "deb [signed-by=${keyring}] https://packages.twingate.com/apt/ * *" | \
-            sudo tee "${sources_file}" > /dev/null
-        print_success "Repository added"
-    else
-        print_skip "Twingate repository"
-    fi
-
-    apt_update
-    apt_install twingate
-
-    echo ""
-    print_success "Twingate installed successfully!"
-    print_warning "Configure Twingate by running: sudo twingate setup"
-    print_status "Network name: angelstudios"
-    echo ""
-}
-
-install_desktop_settings() {
-    print_section "Desktop Settings (Ubuntu/Wayland)"
-
-    if ! command_exists gsettings; then
-        print_warning "gsettings not available, skipping desktop configuration"
-        return 0
-    fi
-
-    # Check if running on Wayland
-    local session_type="${XDG_SESSION_TYPE:-unknown}"
-    if [[ "${session_type}" == "wayland" ]]; then
-        print_status "Detected Wayland session"
-    elif [[ "${session_type}" == "x11" ]]; then
-        print_warning "Detected X11 session (Wayland recommended for Ubuntu)"
-    else
-        print_status "Session type: ${session_type}"
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Configure Ubuntu desktop settings (dark mode, dock, icons)"
-        return 0
-    fi
-
-    local changes_made=0
-
-    # Set dark mode (Ubuntu GNOME with Yaru theme)
-    local current_color_scheme
-    current_color_scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo "")
-    if [[ "${current_color_scheme}" != "'prefer-dark'" ]]; then
-        print_status "Setting appearance to dark mode..."
-        gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
-        gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark'
-        gsettings set org.gnome.desktop.interface icon-theme 'Yaru-dark'
-        # Also set legacy settings for older apps
-        gsettings set org.gnome.desktop.wm.preferences theme 'Yaru-dark'
-        print_success "Dark mode enabled (Yaru-dark theme)"
-        changes_made=$((changes_made + 1))
-    else
-        print_skip "Dark mode (already enabled)"
-    fi
-
-    # Configure Ubuntu Dock (dash-to-dock is built into Ubuntu)
-    # Ubuntu uses a forked version with schema: org.gnome.shell.extensions.dash-to-dock
-    if gsettings list-schemas | grep -q "org.gnome.shell.extensions.dash-to-dock"; then
-        local dock_schema="org.gnome.shell.extensions.dash-to-dock"
-        
-        # Enable auto-hide (intellihide is Ubuntu's default smart hide)
-        local dock_fixed
-        dock_fixed=$(gsettings get ${dock_schema} dock-fixed 2>/dev/null || echo "true")
-        if [[ "${dock_fixed}" != "false" ]]; then
-            print_status "Enabling dock auto-hide..."
-            gsettings set ${dock_schema} dock-fixed false
-            gsettings set ${dock_schema} autohide true
-            gsettings set ${dock_schema} intellihide true
-            gsettings set ${dock_schema} intellihide-mode 'ALL_WINDOWS'
-            # Wayland-specific: ensure proper behavior
-            gsettings set ${dock_schema} autohide-in-fullscreen false
-            print_success "Dock auto-hide enabled (intellihide mode)"
-            changes_made=$((changes_made + 1))
-        else
-            print_skip "Dock auto-hide (already enabled)"
-        fi
-
-        # Turn off panel mode (extend-height makes dock span full height)
-        local extend_height
-        extend_height=$(gsettings get ${dock_schema} extend-height 2>/dev/null || echo "true")
-        if [[ "${extend_height}" != "false" ]]; then
-            print_status "Disabling dock panel mode..."
-            gsettings set ${dock_schema} extend-height false
-            print_success "Panel mode disabled"
-            changes_made=$((changes_made + 1))
-        else
-            print_skip "Panel mode (already disabled)"
-        fi
-
-        # Set icon size to smallest (Ubuntu default is 48, smallest practical is 24)
-        local icon_size
-        icon_size=$(gsettings get ${dock_schema} dash-max-icon-size 2>/dev/null || echo "48")
-        if [[ "${icon_size}" != "16" ]]; then
-            print_status "Setting dock icon size to smallest..."
-            gsettings set ${dock_schema} dash-max-icon-size 16
-            print_success "Icon size set to 16px (smallest)"
-            changes_made=$((changes_made + 1))
-        else
-            print_skip "Icon size (already at smallest)"
-        fi
-
-        # Position dock to bottom
-        local dock_position
-        dock_position=$(gsettings get ${dock_schema} dock-position 2>/dev/null || echo "'LEFT'")
-        if [[ "${dock_position}" != "'BOTTOM'" ]]; then
-            print_status "Positioning dock to bottom..."
-            gsettings set ${dock_schema} dock-position 'BOTTOM'
-            print_success "Dock positioned to bottom"
-            changes_made=$((changes_made + 1))
-        else
-            print_skip "Dock position (already at bottom)"
-        fi
-
-        changes_made=$((changes_made + 1))
-    else
-        print_warning "Ubuntu Dock (dash-to-dock) not found, skipping dock settings"
-    fi
-
-    # Set desktop icon position to top-right (Ubuntu 23.04+ uses DING extension)
-    if gsettings list-schemas | grep -q "org.gnome.shell.extensions.ding"; then
-        local start_corner
-        start_corner=$(gsettings get org.gnome.shell.extensions.ding start-corner 2>/dev/null || echo "'top-left'")
-        if [[ "${start_corner}" != "'top-right'" ]]; then
-            print_status "Setting desktop icons to start from top-right..."
-            gsettings set org.gnome.shell.extensions.ding start-corner 'top-right'
-            # Also configure icon arrangement
-            gsettings set org.gnome.shell.extensions.ding icon-size 'small'
-            gsettings set org.gnome.shell.extensions.ding show-home false
-            gsettings set org.gnome.shell.extensions.ding show-trash true
-            gsettings set org.gnome.shell.extensions.ding show-volumes true
-            print_success "Desktop icons set to top-right (DING extension)"
-            changes_made=$((changes_made + 1))
-        else
-            print_skip "Desktop icons position (already top-right)"
-        fi
-    else
-        print_warning "DING extension not found (Ubuntu desktop icons)"
-    fi
-
-    echo ""
-    if [[ ${changes_made} -gt 0 ]]; then
-        print_success "Ubuntu desktop settings configured (${changes_made} changes made)"
-        if [[ "${session_type}" == "wayland" ]]; then
-            print_status "Wayland detected - settings optimized for Wayland session"
-        fi
-        print_status "You may need to log out and back in for all changes to take effect"
-    else
-        print_status "All desktop settings already configured"
-    fi
-}
-
-install_ffmpeg() {
-    print_section "FFmpeg"
-
-    if command_exists ffmpeg; then
-        local ffmpeg_version
-        ffmpeg_version=$(ffmpeg -version 2>&1 | head -n 1 | awk '{print $3}')
-        print_skip "FFmpeg (version ${ffmpeg_version})"
-        return 0
-    fi
-
-    apt_install ffmpeg
-}
-
-install_spotify() {
-    print_section "Spotify"
-
-    if command_exists spotify || package_installed spotify-client; then
-        print_skip "Spotify"
-        return 0
-    fi
-
-    local keyring="/etc/apt/trusted.gpg.d/spotify.gpg"
-    local sources_file="/etc/apt/sources.list.d/spotify.list"
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Spotify (add GPG key, repo, and install package)"
-        return 0
-    fi
-
-    # Add GPG key if not present
-    if ! gpg_key_exists "${keyring}"; then
-        print_status "Adding Spotify GPG key..."
-        curl -sS https://download.spotify.com/debian/pubkey_5384CE82BA52C83A.asc | \
-            sudo gpg --dearmor --yes -o "${keyring}"
-        print_success "GPG key added"
-    else
-        print_skip "Spotify GPG key"
-    fi
-
-    # Add repository if not present
-    if [[ ! -f "${sources_file}" ]]; then
-        print_status "Adding Spotify repository..."
-        echo "deb https://repository.spotify.com stable non-free" | \
-            sudo tee "${sources_file}" > /dev/null
-        print_success "Repository added"
-    else
-        print_skip "Spotify repository"
-    fi
-
-    apt_update
-    apt_install spotify-client
-}
-
-
-install_gimp() {
-    print_section "GIMP Image Editor"
-
-    if command_exists gimp || package_installed gimp; then
-        print_skip "GIMP"
-        return 0
-    fi
-
-    apt_install gimp
-}
-
-
-install_gitkraken() {
-    print_section "GitKraken Desktop"
-
-    if command_exists gitkraken || package_installed gitkraken; then
-        print_skip "GitKraken"
-        return 0
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Download and install GitKraken .deb from release.gitkraken.com"
-        return 0
-    fi
-
-    local gitkraken_deb="/tmp/gitkraken-amd64.deb"
-
-    print_status "Downloading GitKraken..."
-    curl -fsSL -o "${gitkraken_deb}" https://release.gitkraken.com/linux/gitkraken-amd64.deb
-    print_success "GitKraken downloaded"
-
-    print_status "Installing GitKraken..."
-    sudo apt install -y "${gitkraken_deb}"
-    rm -f "${gitkraken_deb}"
-    print_success "GitKraken installed"
 }
 
 install_claude_code() {
@@ -1259,92 +860,402 @@ install_claude_code() {
     print_success "Claude Code CLI installed"
 }
 
-install_go() {
-    print_section "Go Programming Language"
+install_1password() {
+    print_section "1Password"
 
-    if command_exists go; then
-        local go_version
-        go_version=$(go version | awk '{print $3}')
-        print_skip "Go (${go_version})"
+    if package_installed 1password; then
+        print_skip "1Password"
         return 0
     fi
 
     if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Go via apt"
+        print_dry_run "Install 1Password (add GPG key, repo, debsig, and install package)"
         return 0
     fi
 
-    apt_install golang-go
+    add_signed_repo_by_name "1Password"
 
-    if command_exists go; then
-        local go_version
-        go_version=$(go version | awk '{print $3}')
-        print_success "Go installed (${go_version})"
+    # 1Password-specific: debsig verification
+    local debsig_policy_dir="/etc/debsig/policies/AC2D62742012EA22"
+    local debsig_keyring_dir="/usr/share/debsig/keyrings/AC2D62742012EA22"
+
+    if [[ ! -f "${debsig_policy_dir}/1password.pol" ]]; then
+        print_status "Setting up debsig verification..."
+        sudo mkdir -p "${debsig_policy_dir}"
+        curl -sS https://downloads.1password.com/linux/debian/debsig/1password.pol | \
+            sudo tee "${debsig_policy_dir}/1password.pol" > /dev/null
+        sudo mkdir -p "${debsig_keyring_dir}"
+        curl -sS https://downloads.1password.com/linux/keys/1password.asc | \
+            sudo gpg --dearmor --yes --output "${debsig_keyring_dir}/debsig.gpg"
+        print_success "Debsig verification configured"
     else
-        print_warning "Go installation completed but go not found in PATH"
+        print_skip "1Password debsig verification"
+    fi
+
+    apt_update_if_needed
+    apt_install 1password
+}
+
+install_docker() {
+    print_section "Docker Engine"
+
+    if command_exists docker; then
+        local docker_version
+        docker_version=$(docker --version | awk '{print $3}' | sed 's/,//')
+        print_skip "Docker Engine (version ${docker_version})"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Docker Engine (add GPG key, repo, and install packages)"
+        return 0
+    fi
+
+    add_signed_repo_by_name "Docker"
+    apt_update_if_needed
+    apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+    # Add current user to docker group
+    if groups "${USER}" | grep -qw docker; then
+        print_skip "User '${USER}' in docker group"
+    else
+        print_status "Adding user '${USER}' to docker group..."
+        sudo usermod -aG docker "${USER}"
+        print_success "User added to docker group"
+        print_warning "You'll need to log out and back in for group changes to take effect"
+    fi
+
+    # Start and enable Docker service
+    if systemctl is-active --quiet docker; then
+        print_skip "Docker service (already running)"
+    else
+        print_status "Starting Docker service..."
+        sudo systemctl start docker
+        sudo systemctl enable docker
+        print_success "Docker service started and enabled"
+    fi
+
+    echo ""
+    print_success "Docker installation complete!"
+    print_status "Docker version: $(docker --version 2>/dev/null || echo 'N/A')"
+    print_status "Docker Compose version: $(docker compose version 2>/dev/null || echo 'N/A')"
+}
+
+install_twingate() {
+    print_section "Twingate VPN Client"
+
+    if command_exists twingate || package_installed twingate; then
+        print_skip "Twingate"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Twingate (add GPG key, repo, and install package)"
+        return 0
+    fi
+
+    add_signed_repo_by_name "Twingate"
+    apt_update_if_needed
+    apt_install twingate
+
+    echo ""
+    print_success "Twingate installed successfully!"
+    print_warning "Configure Twingate by running: sudo twingate setup"
+    print_status "Network name: ${TWINGATE_NETWORK}"
+    echo ""
+}
+
+install_postgresql() {
+    print_section "PostgreSQL"
+
+    if command_exists psql; then
+        local pg_version
+        pg_version=$(psql --version | awk '{print $3}')
+        print_skip "PostgreSQL (version ${pg_version})"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install PostgreSQL (add GPG key, repo, and install package)"
+        return 0
+    fi
+
+    add_signed_repo_by_name "PostgreSQL"
+    apt_update_if_needed
+    apt_install postgresql postgresql-contrib
+
+    # Start and enable PostgreSQL service
+    if systemctl is-active --quiet postgresql; then
+        print_skip "PostgreSQL service (already running)"
+    else
+        print_status "Starting PostgreSQL service..."
+        sudo systemctl start postgresql
+        sudo systemctl enable postgresql
+        print_success "PostgreSQL service started and enabled"
     fi
 }
 
-install_vlc() {
-    print_section "VLC Media Player"
+# =============================================================================
+# Data-Driven Installers
+# =============================================================================
 
-    if flatpak_installed "org.videolan.VLC"; then
-        print_skip "VLC"
-        return 0
-    fi
+# Installs all SIMPLE_SIGNED_REPO_APPS entries from the SIGNED_REPO_APPS config.
+install_signed_repo_apps() {
+    for label in "${SIMPLE_SIGNED_REPO_APPS[@]}"; do
+        # Look up entry in SIGNED_REPO_APPS
+        local entry=""
+        local e
+        for e in "${SIGNED_REPO_APPS[@]}"; do
+            if [[ "${e%%|*}" == "${label}" ]]; then
+                entry="${e}"
+                break
+            fi
+        done
+        if [[ -z "${entry}" ]]; then
+            print_error "No SIGNED_REPO_APPS entry for: ${label}"
+            continue
+        fi
+
+        local _label gpg_url keyring sources_file repo_line packages
+        IFS='|' read -r _label gpg_url keyring sources_file repo_line packages <<< "${entry}"
+
+        print_section "${label}"
+
+        # Check if first package is already installed
+        local first_pkg="${packages%% *}"
+        if package_installed "${first_pkg}"; then
+            print_skip "${label}"
+            continue
+        fi
+
+        # Spotify: migrate old insecure keyring from trusted.gpg.d
+        if [[ "${label}" == "Spotify" ]] && [[ "${DRY_RUN}" != true ]]; then
+            local old_keyring="/etc/apt/trusted.gpg.d/spotify.gpg"
+            if [[ -f "${old_keyring}" ]]; then
+                print_status "Migrating Spotify keyring to secure location..."
+                sudo rm -f "${old_keyring}"
+            fi
+        fi
+
+        add_signed_repo "${label}" "${gpg_url}" "${keyring}" "${sources_file}" "${repo_line}"
+        apt_update_if_needed
+        # Intentionally unquoted to allow word splitting on multi-package entries
+        apt_install ${packages}
+    done
+}
+
+# Installs all SIMPLE_APT_APPS entries from default repos.
+install_simple_apt_apps() {
+    print_section "Additional Packages"
+
+    for entry in "${SIMPLE_APT_APPS[@]}"; do
+        local cmd_name pkg_name display_name
+        IFS='|' read -r cmd_name pkg_name display_name <<< "${entry}"
+
+        if command_exists "${cmd_name}" || package_installed "${pkg_name}"; then
+            print_skip "${display_name}"
+            continue
+        fi
+
+        apt_install "${pkg_name}"
+    done
+}
+
+# Installs all FLATPAK_APPS entries.
+install_flatpak_apps() {
+    print_section "Flatpak Apps"
 
     if [[ "${INSTALL_FLATPAK}" != true ]]; then
-        print_warning "Skipping VLC (Flatpak disabled)"
+        print_warning "Skipping Flatpak apps (Flatpak disabled)"
         return 0
     fi
 
     if ! command_exists flatpak; then
-        print_warning "Flatpak not available, skipping VLC"
+        print_warning "Flatpak not available, skipping"
         return 0
     fi
 
-    flatpak_install "org.videolan.VLC" "VLC Media Player"
+    local failed_apps=()
+    local installed_count=0
+    local skipped_count=0
+
+    for app_entry in "${FLATPAK_APPS[@]}"; do
+        local app_id="${app_entry%%|*}"
+        local app_name="${app_entry##*|}"
+
+        if flatpak_installed "${app_id}"; then
+            print_skip "${app_name}"
+            skipped_count=$((skipped_count + 1))
+        elif flatpak_install "${app_id}" "${app_name}"; then
+            installed_count=$((installed_count + 1))
+        else
+            failed_apps+=("${app_name}")
+            log "ERROR" "Failed to install flatpak: ${app_id} (${app_name})"
+        fi
+    done
+
+    echo ""
+    if [[ ${installed_count} -gt 0 ]]; then
+        print_success "Newly installed: ${installed_count} apps"
+    fi
+    if [[ ${skipped_count} -gt 0 ]]; then
+        print_status "Already installed: ${skipped_count} apps"
+    fi
+    if [[ ${#failed_apps[@]} -gt 0 ]]; then
+        print_warning "Failed to install: ${failed_apps[*]}"
+    fi
 }
 
-install_ngrok() {
-    print_section "ngrok CLI"
+# =============================================================================
+# Desktop Settings
+# =============================================================================
 
-    if command_exists ngrok || package_installed ngrok; then
-        print_skip "ngrok"
+install_desktop_settings() {
+    print_section "Desktop Settings (Ubuntu/Wayland)"
+
+    if ! command_exists gsettings; then
+        print_warning "gsettings not available, skipping desktop configuration"
         return 0
     fi
 
-    local keyring="/etc/apt/keyrings/ngrok.gpg"
-    local sources_file="/etc/apt/sources.list.d/ngrok.list"
+    local session_type="${XDG_SESSION_TYPE:-unknown}"
+    if [[ "${session_type}" == "wayland" ]]; then
+        print_status "Detected Wayland session"
+    elif [[ "${session_type}" == "x11" ]]; then
+        print_warning "Detected X11 session (Wayland recommended for Ubuntu)"
+    else
+        print_status "Session type: ${session_type}"
+    fi
 
     if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install ngrok (add GPG key, repo, and install package)"
+        print_dry_run "Configure Ubuntu desktop settings (dark mode, dock, icons)"
         return 0
     fi
 
-    # Add GPG key if not present
-    if ! gpg_key_exists "${keyring}"; then
-        print_status "Adding ngrok GPG key..."
-        sudo mkdir -p /etc/apt/keyrings
-        curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | \
-            sudo gpg --dearmor -o "${keyring}"
-        print_success "GPG key added"
+    local changes_made=0
+
+    # Set dark mode
+    local current_color_scheme
+    current_color_scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo "")
+    if [[ "${current_color_scheme}" != "'prefer-dark'" ]]; then
+        print_status "Setting appearance to dark mode..."
+        gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+        gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark'
+        gsettings set org.gnome.desktop.interface icon-theme 'Yaru-dark'
+        gsettings set org.gnome.desktop.wm.preferences theme 'Yaru-dark'
+        print_success "Dark mode enabled (Yaru-dark theme)"
+        changes_made=$((changes_made + 1))
     else
-        print_skip "ngrok GPG key"
+        print_skip "Dark mode (already enabled)"
     fi
 
-    # Add repository if not present
-    if [[ ! -f "${sources_file}" ]]; then
-        print_status "Adding ngrok repository..."
-        echo "deb [signed-by=${keyring}] https://ngrok-agent.s3.amazonaws.com buster main" | \
-            sudo tee "${sources_file}" > /dev/null
-        print_success "Repository added"
+    # Configure Ubuntu Dock
+    if gsettings list-schemas | grep -q "org.gnome.shell.extensions.dash-to-dock"; then
+        local dock_schema="org.gnome.shell.extensions.dash-to-dock"
+
+        local dock_fixed
+        dock_fixed=$(gsettings get ${dock_schema} dock-fixed 2>/dev/null || echo "true")
+        if [[ "${dock_fixed}" != "false" ]]; then
+            print_status "Enabling dock auto-hide..."
+            gsettings set ${dock_schema} dock-fixed false
+            gsettings set ${dock_schema} autohide true
+            gsettings set ${dock_schema} intellihide true
+            gsettings set ${dock_schema} intellihide-mode 'ALL_WINDOWS'
+            gsettings set ${dock_schema} autohide-in-fullscreen false
+            print_success "Dock auto-hide enabled (intellihide mode)"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Dock auto-hide (already enabled)"
+        fi
+
+        local extend_height
+        extend_height=$(gsettings get ${dock_schema} extend-height 2>/dev/null || echo "true")
+        if [[ "${extend_height}" != "false" ]]; then
+            print_status "Disabling dock panel mode..."
+            gsettings set ${dock_schema} extend-height false
+            print_success "Panel mode disabled"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Panel mode (already disabled)"
+        fi
+
+        local icon_size
+        icon_size=$(gsettings get ${dock_schema} dash-max-icon-size 2>/dev/null || echo "48")
+        if [[ "${icon_size}" != "16" ]]; then
+            print_status "Setting dock icon size to smallest..."
+            gsettings set ${dock_schema} dash-max-icon-size 16
+            print_success "Icon size set to 16px (smallest)"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Icon size (already at smallest)"
+        fi
+
+        local dock_position
+        dock_position=$(gsettings get ${dock_schema} dock-position 2>/dev/null || echo "'LEFT'")
+        if [[ "${dock_position}" != "'BOTTOM'" ]]; then
+            print_status "Positioning dock to bottom..."
+            gsettings set ${dock_schema} dock-position 'BOTTOM'
+            print_success "Dock positioned to bottom"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Dock position (already at bottom)"
+        fi
     else
-        print_skip "ngrok repository"
+        print_warning "Ubuntu Dock (dash-to-dock) not found, skipping dock settings"
     fi
 
-    apt_update
-    apt_install ngrok
+    # Desktop icon position
+    if gsettings list-schemas | grep -q "org.gnome.shell.extensions.ding"; then
+        local start_corner
+        start_corner=$(gsettings get org.gnome.shell.extensions.ding start-corner 2>/dev/null || echo "'top-left'")
+        if [[ "${start_corner}" != "'top-right'" ]]; then
+            print_status "Setting desktop icons to start from top-right..."
+            gsettings set org.gnome.shell.extensions.ding start-corner 'top-right'
+            gsettings set org.gnome.shell.extensions.ding icon-size 'small'
+            gsettings set org.gnome.shell.extensions.ding show-home false
+            gsettings set org.gnome.shell.extensions.ding show-trash true
+            gsettings set org.gnome.shell.extensions.ding show-volumes true
+            print_success "Desktop icons set to top-right (DING extension)"
+            changes_made=$((changes_made + 1))
+        else
+            print_skip "Desktop icons position (already top-right)"
+        fi
+    else
+        print_warning "DING extension not found (Ubuntu desktop icons)"
+    fi
+
+    echo ""
+    if [[ ${changes_made} -gt 0 ]]; then
+        print_success "Ubuntu desktop settings configured (${changes_made} changes made)"
+        if [[ "${session_type}" == "wayland" ]]; then
+            print_status "Wayland detected - settings optimized for Wayland session"
+        fi
+        print_status "You may need to log out and back in for all changes to take effect"
+    else
+        print_status "All desktop settings already configured"
+    fi
+}
+
+# =============================================================================
+# Setup Helpers
+# =============================================================================
+
+setup_sudo_keepalive() {
+    if [[ "${DRY_RUN}" == true ]]; then
+        return 0
+    fi
+
+    if ! sudo -v; then
+        print_error "Failed to obtain sudo privileges"
+        exit 1
+    fi
+
+    while true; do
+        sudo -n true
+        sleep 60
+        kill -0 "$$" || exit
+    done 2>/dev/null &
+    SUDO_KEEPALIVE_PID=$!
 }
 
 # =============================================================================
@@ -1352,7 +1263,19 @@ install_ngrok() {
 # =============================================================================
 
 show_help() {
-    sed -n '2,14p' "$0" | sed 's/^#//'
+    cat <<'HELPEOF'
+System Setup Script
+Configures a fresh Ubuntu/Pop!_OS installation with common development tools
+
+Usage: ./system-setup.sh [OPTIONS]
+  --force-system76          Force System76 driver installation (auto-detected by default)
+  --skip-system76           Skip System76 driver installation even if detected
+  --skip-system76-nvidia    Skip NVIDIA driver installation
+  --skip-flatpak            Skip Flatpak and GNOME Circle apps
+  --skip-reboot-pause       Skip the reboot pause after Flatpak setup
+  --dry-run                 Show what would be installed without making changes
+  --help                    Show this help message
+HELPEOF
     exit 0
 }
 
@@ -1411,22 +1334,10 @@ main() {
     print_status "Log file: ${LOG_FILE}"
     echo ""
 
-    # Verify we have necessary permissions (skip in dry run)
-    if [[ "${DRY_RUN}" != true ]]; then
-        if ! sudo -v; then
-            print_error "Failed to obtain sudo privileges"
-            exit 1
-        fi
+    # Sudo setup
+    setup_sudo_keepalive
 
-        # Keep sudo alive throughout the script
-        while true; do
-            sudo -n true
-            sleep 60
-            kill -0 "$$" || exit
-        done 2>/dev/null &
-    fi
-
-    # Ensure curl is installed (required for various setup operations)
+    # Ensure curl is available
     if ! command_exists curl; then
         print_status "Installing curl (required dependency)..."
         if [[ "${DRY_RUN}" != true ]]; then
@@ -1440,45 +1351,68 @@ main() {
         print_skip "curl"
     fi
 
-    # Run installation steps
+    # --- System Updates ---
     print_section "System Updates"
     apt_update
     apt_upgrade
 
+    # --- Hardware Drivers ---
     install_system76_drivers
-    install_flatpak
+
+    # --- Flatpak Infrastructure ---
+    setup_flatpak
+
+    # --- Web Browsers ---
+    install_brave
+
+    # --- Version Control ---
     install_git
     install_git_lfs
-    install_github_desktop
-    install_nodejs
-    install_npm_packages
-    install_bun
-    install_docker
-    install_brave
-    install_google_chrome
-    install_chromium
-    install_1password
-    install_flatpaks
-    install_jdk
-    install_twingate
-    install_desktop_settings
-    install_ffmpeg
-    install_spotify
-    install_gimp
     install_gitkraken
+
+    # --- Languages & Runtimes ---
+    install_nodejs
+    install_bun
+    install_jdk
+
+    # --- Package Managers & CLI Tools ---
+    install_npm_packages
     install_claude_code
-    install_go
-    install_vlc
-    install_ngrok
 
-    # Cleanup
+    # --- Security & Passwords ---
+    install_1password
+
+    # --- Containers & Infrastructure ---
+    install_docker
+    install_twingate
+
+    # --- Databases ---
+    install_postgresql
+
+    # --- Signed-Repo Apps (Chrome, GitHub Desktop, Spotify, pgAdmin, ngrok) ---
+    install_signed_repo_apps
+
+    # --- Simple APT Packages (Chromium, FFmpeg, GIMP, Go) ---
+    install_simple_apt_apps
+
+    # --- Flatpak Apps ---
+    install_flatpak_apps
+
+    # --- Desktop Customization ---
+    install_desktop_settings
+
+    # --- Cleanup ---
     print_section "System Cleanup"
-    print_status "Running apt auto cleanup..."
-    sudo apt autoremove -y 2>&1 | tee -a "${LOG_FILE}"
-    sudo apt autoclean -y 2>&1 | tee -a "${LOG_FILE}"
-    print_success "Cleanup completed"
+    if [[ "${DRY_RUN}" != true ]]; then
+        print_status "Running apt auto cleanup..."
+        sudo apt autoremove -y 2>&1 | tee -a "${LOG_FILE}"
+        sudo apt autoclean -y 2>&1 | tee -a "${LOG_FILE}"
+        print_success "Cleanup completed"
+    else
+        print_dry_run "apt autoremove and autoclean"
+    fi
 
-    # Final summary
+    # --- Summary ---
     print_section "Setup Complete"
     print_success "System setup finished successfully!"
     print_status "Log file saved to: ${LOG_FILE}"
