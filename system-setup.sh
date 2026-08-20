@@ -63,6 +63,8 @@ readonly SIGNED_REPO_APPS=(
     "PostgreSQL|https://www.postgresql.org/media/keys/ACCC4CF8.asc|/usr/share/keyrings/pgdg-archive-keyring.gpg|/etc/apt/sources.list.d/pgdg.list|deb [signed-by={KEYRING}] https://apt.postgresql.org/pub/repos/apt {CODENAME}-pgdg main|postgresql postgresql-contrib"
     # Databases
     "pgAdmin 4|https://www.pgadmin.org/static/packages_pgadmin_org.pub|/usr/share/keyrings/pgadmin4-archive-keyring.gpg|/etc/apt/sources.list.d/pgadmin4.list|deb [signed-by={KEYRING}] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/{CODENAME} pgadmin4 main|pgadmin4-desktop"
+    # Editors
+    "VSCodium|https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg|/usr/share/keyrings/vscodium-archive-keyring.gpg|/etc/apt/sources.list.d/vscodium.list|deb [ signed-by={KEYRING} ] https://download.vscodium.com/debs vscodium main|codium"
     # Dev tools
     "ngrok|https://ngrok-agent.s3.amazonaws.com/ngrok.asc|/usr/share/keyrings/ngrok-archive-keyring.gpg|/etc/apt/sources.list.d/ngrok.list|deb [signed-by={KEYRING}] https://ngrok-agent.s3.amazonaws.com buster main|ngrok"
 )
@@ -75,6 +77,7 @@ readonly SIMPLE_SIGNED_REPO_APPS=(
     "Spotify"
     "pgAdmin 4"
     "ngrok"
+    "VSCodium"
 )
 
 # Simple APT packages (default repos, no custom repo needed):
@@ -837,27 +840,60 @@ install_jdk() {
 install_claude_code() {
     print_section "Claude Code CLI"
 
-    if command_exists claude; then
+    local claude_path="${HOME}/.local/bin/claude"
+
+    if command_exists claude || [[ -x "${claude_path}" ]]; then
         local claude_version
-        claude_version=$(claude --version 2>/dev/null || echo "unknown")
+        if command_exists claude; then
+            claude_version=$(claude --version 2>/dev/null || echo "unknown")
+        else
+            claude_version=$("${claude_path}" --version 2>/dev/null || echo "unknown")
+        fi
         print_skip "Claude Code CLI (${claude_version})"
         return 0
     fi
 
     if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Claude Code CLI via npm (npm install -g @anthropic-ai/claude-code)"
+        print_dry_run "Install Claude Code CLI via native installer (curl -fsSL https://claude.ai/install.sh | bash)"
+        print_dry_run "Add ~/.local/bin to PATH in .bashrc"
         return 0
     fi
 
-    if ! command_exists npm; then
-        print_warning "npm not available, skipping Claude Code CLI"
-        print_warning "Install Node.js/npm first, then run: npm install -g @anthropic-ai/claude-code"
-        return 1
+    if command_exists npm && npm list -g @anthropic-ai/claude-code &>/dev/null; then
+        print_warning "Found an npm-installed Claude Code; removing it in favour of the native install"
+        sudo npm uninstall -g @anthropic-ai/claude-code || true
     fi
 
-    print_status "Installing Claude Code CLI..."
-    sudo npm install -g @anthropic-ai/claude-code
+    print_status "Installing Claude Code CLI (native installer)..."
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+    curl -fsSL -o "${tmp_installer}" https://claude.ai/install.sh
+    bash "${tmp_installer}"
+    rm -f "${tmp_installer}"
     print_success "Claude Code CLI installed"
+
+    local path_entry="export PATH=\"\${HOME}/.local/bin:\${PATH}\""
+    local bashrc="${HOME}/.bashrc"
+
+    if ! grep -qF '.local/bin' "${bashrc}" 2>/dev/null; then
+        print_status "Adding ~/.local/bin to PATH in .bashrc..."
+        echo "" >> "${bashrc}"
+        echo "# Local binaries (Claude Code)" >> "${bashrc}"
+        echo "${path_entry}" >> "${bashrc}"
+        print_success "Added ~/.local/bin to PATH"
+    else
+        print_skip "~/.local/bin PATH entry"
+    fi
+
+    export PATH="${HOME}/.local/bin:${PATH}"
+
+    if command_exists claude; then
+        local claude_version
+        claude_version=$(claude --version 2>/dev/null || echo "unknown")
+        print_success "Claude Code CLI ${claude_version} installed successfully"
+    else
+        print_warning "Claude Code installed but not found in PATH (may need to restart shell)"
+    fi
 }
 
 install_1password() {
