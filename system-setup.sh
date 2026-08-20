@@ -50,6 +50,7 @@ readonly SIGNED_REPO_APPS=(
     # Browsers
     "Google Chrome|https://dl.google.com/linux/linux_signing_key.pub|/usr/share/keyrings/google-chrome-keyring.gpg|/etc/apt/sources.list.d/google-chrome.list|deb [arch={ARCH} signed-by={KEYRING}] https://dl.google.com/linux/chrome/deb/ stable main|google-chrome-stable"
     # Version control
+    "GitHub CLI|https://cli.github.com/packages/githubcli-archive-keyring.gpg|/usr/share/keyrings/githubcli-archive-keyring.gpg|/etc/apt/sources.list.d/github-cli.list|deb [arch={ARCH} signed-by={KEYRING}] https://cli.github.com/packages stable main|gh"
     "GitHub Desktop|https://mirror.mwt.me/shiftkey-desktop/gpgkey|/usr/share/keyrings/mwt-desktop.gpg|/etc/apt/sources.list.d/mwt-desktop.list|deb [arch={ARCH} signed-by={KEYRING}] https://mirror.mwt.me/shiftkey-desktop/deb/ any main|github-desktop"
     # Containers (post-install: usermod, systemctl)
     "Docker|https://download.docker.com/linux/ubuntu/gpg|/usr/share/keyrings/docker-archive-keyring.gpg|/etc/apt/sources.list.d/docker.list|deb [arch={ARCH} signed-by={KEYRING}] https://download.docker.com/linux/ubuntu {CODENAME} stable|docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
@@ -73,6 +74,7 @@ readonly SIGNED_REPO_APPS=(
 # These are installed automatically by install_signed_repo_apps().
 readonly SIMPLE_SIGNED_REPO_APPS=(
     "Google Chrome"
+    "GitHub CLI"
     "GitHub Desktop"
     "Spotify"
     "pgAdmin 4"
@@ -1425,7 +1427,7 @@ main() {
     # --- Databases ---
     install_postgresql
 
-    # --- Signed-Repo Apps (Chrome, GitHub Desktop, Spotify, pgAdmin, ngrok) ---
+    # --- Signed-Repo Apps (Chrome, GitHub CLI, GitHub Desktop, Spotify, pgAdmin, ngrok) ---
     install_signed_repo_apps
 
     # --- Simple APT Packages (Chromium, FFmpeg, GIMP, Go) ---
