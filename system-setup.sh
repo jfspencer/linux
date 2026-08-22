@@ -818,6 +818,76 @@ install_bun() {
     fi
 }
 
+install_rust() {
+    print_section "Rust Toolchain"
+
+    local cargo_env="${HOME}/.cargo/env"
+    local rustup_path="${HOME}/.cargo/bin/rustup"
+
+    if command_exists rustup || [[ -x "${rustup_path}" ]]; then
+        local rustc_bin="rustc"
+        command_exists rustc || rustc_bin="${HOME}/.cargo/bin/rustc"
+        local rust_version
+        rust_version=$("${rustc_bin}" --version 2>/dev/null | awk '{print $2}')
+        print_skip "Rust (version ${rust_version:-unknown})"
+
+        if [[ "${DRY_RUN}" != true ]]; then
+            print_status "Updating Rust toolchain..."
+            "${rustup_path}" update stable 2>&1 | tee -a "${LOG_FILE}"
+            print_success "Rust toolchain up to date"
+        else
+            print_dry_run "rustup update stable"
+        fi
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Rust via rustup official install script"
+        print_dry_run "Install rustfmt and clippy components"
+        print_dry_run "Add Cargo to PATH in .bashrc"
+        return 0
+    fi
+
+    # build-essential provides the linker (cc) that cargo needs
+    apt_install build-essential
+
+    print_status "Installing Rust via rustup..."
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+    curl -fsSL --proto '=https' --tlsv1.2 -o "${tmp_installer}" https://sh.rustup.rs
+    bash "${tmp_installer}" -y --no-modify-path --default-toolchain stable --profile default
+    rm -f "${tmp_installer}"
+    print_success "Rust installed"
+
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+
+    print_status "Ensuring rustfmt and clippy are installed..."
+    rustup component add rustfmt clippy 2>&1 | tee -a "${LOG_FILE}" || \
+        print_warning "Could not add rustfmt/clippy components"
+
+    local bashrc="${HOME}/.bashrc"
+    if ! grep -qF ".cargo/env" "${bashrc}" 2>/dev/null; then
+        print_status "Adding Cargo to PATH in .bashrc..."
+        {
+            echo ""
+            echo "# Rust (cargo)"
+            echo ". \"\${HOME}/.cargo/env\""
+        } >> "${bashrc}"
+        print_success "Added Cargo to PATH"
+    else
+        print_skip "Cargo PATH entry"
+    fi
+
+    # shellcheck source=/dev/null
+    [[ -f "${cargo_env}" ]] && source "${cargo_env}"
+
+    if command_exists rustc && command_exists cargo; then
+        print_success "Rust $(rustc --version | awk '{print $2}') / Cargo $(cargo --version | awk '{print $2}') installed successfully"
+    else
+        print_warning "Rust installed but rustc/cargo not found in PATH (may need to restart shell)"
+    fi
+}
+
 install_jdk() {
     print_section "Java Development Kit (JDK)"
 
@@ -1411,6 +1481,7 @@ main() {
     # --- Languages & Runtimes ---
     install_nodejs
     install_bun
+    install_rust
     install_jdk
 
     # --- Package Managers & CLI Tools ---
