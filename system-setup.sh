@@ -495,6 +495,12 @@ install_system76_drivers() {
         print_warning "Skipping NVIDIA drivers (disabled)"
     fi
 
+    # Runs even when the driver is already installed so re-running the
+    # script repairs machines set up before this fix.
+    if [[ "${driver_pkg}" == "system76-driver-nvidia" ]]; then
+        configure_nvidia_early_boot
+    fi
+
     if package_installed "${driver_pkg}"; then
         print_skip "${driver_pkg}"
         return 0
@@ -516,6 +522,45 @@ install_system76_drivers() {
     print_status "Running full upgrade to pull in System76 packages..."
     sudo apt full-upgrade -y --allow-downgrades 2>&1 | tee -a "${LOG_FILE}"
     print_success "System76 drivers installed"
+}
+
+# Keeps the NVIDIA modules out of the initramfs so they load after the root
+# filesystem is unlocked. dracut's hostonly mode copies in every loaded GPU
+# driver; with System76's 7.1.x kernel, nvidia-drm taking over the framebuffer
+# during the LUKS prompt kills keyboard input, making the disk impossible to
+# unlock. rd.driver.blacklist only applies inside the initramfs, so the driver
+# still loads normally once the system is up.
+configure_nvidia_early_boot() {
+    local grub_file="/etc/default/grub"
+    local param="rd.driver.blacklist=nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm"
+
+    if [[ ! -f "${grub_file}" ]]; then
+        print_warning "${grub_file} not found; add '${param}' to the kernel command line manually"
+        return 0
+    fi
+
+    if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=.*${param}" "${grub_file}"; then
+        print_skip "NVIDIA early-boot blacklist"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Add ${param} to GRUB_CMDLINE_LINUX_DEFAULT and run update-grub"
+        return 0
+    fi
+
+    print_status "Keeping NVIDIA out of early boot so the disk password prompt works..."
+    sudo cp "${grub_file}" "${grub_file}.bak.$(date +%Y%m%d-%H%M%S)"
+    sudo sed -i -E "s|^(GRUB_CMDLINE_LINUX_DEFAULT=\")([^\"]*)\"|\1\2 ${param}\"|" "${grub_file}"
+    sudo sed -i -E 's|^(GRUB_CMDLINE_LINUX_DEFAULT=") |\1|' "${grub_file}"
+
+    if ! grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=.*${param}" "${grub_file}"; then
+        print_error "Could not update ${grub_file}; add '${param}' manually"
+        return 1
+    fi
+
+    sudo update-grub 2>&1 | tee -a "${LOG_FILE}"
+    print_success "NVIDIA early-boot blacklist added"
 }
 
 # Installs the system76-ubuntu-repo package, which replaces the deprecated
