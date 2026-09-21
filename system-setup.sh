@@ -500,15 +500,21 @@ install_system76_drivers() {
         return 0
     fi
 
-    apt_install "${driver_pkg}"
-
+    # system76-ubuntu-repo pins its origin at priority 1001, so apt prefers
+    # System76's builds even when Ubuntu's are newer (e.g. after a plain
+    # `apt upgrade`). Switching to them is a downgrade, which apt refuses
+    # under -y unless explicitly allowed.
     if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "apt full-upgrade"
+        print_dry_run "apt install --allow-downgrades ${driver_pkg}"
+        print_dry_run "apt full-upgrade --allow-downgrades"
         return 0
     fi
 
+    print_status "Installing ${driver_pkg} (may downgrade packages to System76's pinned versions)..."
+    sudo apt install -y --allow-downgrades "${driver_pkg}" 2>&1 | tee -a "${LOG_FILE}"
+
     print_status "Running full upgrade to pull in System76 packages..."
-    sudo apt full-upgrade -y 2>&1 | tee -a "${LOG_FILE}"
+    sudo apt full-upgrade -y --allow-downgrades 2>&1 | tee -a "${LOG_FILE}"
     print_success "System76 drivers installed"
 }
 
