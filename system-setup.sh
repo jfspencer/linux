@@ -32,6 +32,9 @@ DRY_RUN=false
 # Configurable versions and values
 readonly TARGET_NODE_VERSION="20.19.5"
 readonly TWINGATE_NETWORK="angelstudios"
+readonly GITTURTLE_REPO="https://github.com/FernandoX7/GitTurtle.git"
+readonly DEVELOPER_DIR="${HOME}/Developer"
+readonly GITTURTLE_SRC_DIR="${DEVELOPER_DIR}/GitTurtle"
 
 # =============================================================================
 # Application Lists (edit these to customize your installation)
@@ -51,7 +54,6 @@ readonly SIGNED_REPO_APPS=(
     "Google Chrome|https://dl.google.com/linux/linux_signing_key.pub|/usr/share/keyrings/google-chrome-keyring.gpg|/etc/apt/sources.list.d/google-chrome.list|deb [arch={ARCH} signed-by={KEYRING}] https://dl.google.com/linux/chrome/deb/ stable main|google-chrome-stable"
     # Version control
     "GitHub CLI|https://cli.github.com/packages/githubcli-archive-keyring.gpg|/usr/share/keyrings/githubcli-archive-keyring.gpg|/etc/apt/sources.list.d/github-cli.list|deb [arch={ARCH} signed-by={KEYRING}] https://cli.github.com/packages stable main|gh"
-    "GitHub Desktop|https://mirror.mwt.me/shiftkey-desktop/gpgkey|/usr/share/keyrings/mwt-desktop.gpg|/etc/apt/sources.list.d/mwt-desktop.list|deb [arch={ARCH} signed-by={KEYRING}] https://mirror.mwt.me/shiftkey-desktop/deb/ any main|github-desktop"
     # Containers (post-install: usermod, systemctl)
     "Docker|https://download.docker.com/linux/ubuntu/gpg|/usr/share/keyrings/docker-archive-keyring.gpg|/etc/apt/sources.list.d/docker.list|deb [arch={ARCH} signed-by={KEYRING}] https://download.docker.com/linux/ubuntu {CODENAME} stable|docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
     # VPN (post-install: setup message)
@@ -64,8 +66,6 @@ readonly SIGNED_REPO_APPS=(
     "PostgreSQL|https://www.postgresql.org/media/keys/ACCC4CF8.asc|/usr/share/keyrings/pgdg-archive-keyring.gpg|/etc/apt/sources.list.d/pgdg.list|deb [signed-by={KEYRING}] https://apt.postgresql.org/pub/repos/apt {CODENAME}-pgdg main|postgresql postgresql-contrib"
     # Databases
     "pgAdmin 4|https://www.pgadmin.org/static/packages_pgadmin_org.pub|/usr/share/keyrings/pgadmin4-archive-keyring.gpg|/etc/apt/sources.list.d/pgadmin4.list|deb [signed-by={KEYRING}] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/{CODENAME} pgadmin4 main|pgadmin4-desktop"
-    # Editors
-    "VSCodium|https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg|/usr/share/keyrings/vscodium-archive-keyring.gpg|/etc/apt/sources.list.d/vscodium.list|deb [ signed-by={KEYRING} ] https://download.vscodium.com/debs vscodium main|codium"
     # Dev tools
     "ngrok|https://ngrok-agent.s3.amazonaws.com/ngrok.asc|/usr/share/keyrings/ngrok-archive-keyring.gpg|/etc/apt/sources.list.d/ngrok.list|deb [signed-by={KEYRING}] https://ngrok-agent.s3.amazonaws.com buster main|ngrok"
 )
@@ -75,11 +75,9 @@ readonly SIGNED_REPO_APPS=(
 readonly SIMPLE_SIGNED_REPO_APPS=(
     "Google Chrome"
     "GitHub CLI"
-    "GitHub Desktop"
     "Spotify"
     "pgAdmin 4"
     "ngrok"
-    "VSCodium"
 )
 
 # Simple APT packages (default repos, no custom repo needed):
@@ -229,11 +227,6 @@ package_installed() {
     dpkg -l "$1" 2>/dev/null | grep -q "^ii"
 }
 
-ppa_exists() {
-    local ppa_name="$1"
-    grep -rq "${ppa_name}" /etc/apt/sources.list.d/ 2>/dev/null
-}
-
 flatpak_installed() {
     local app_id="$1"
     flatpak list --app 2>/dev/null | grep -q "${app_id}"
@@ -251,6 +244,10 @@ gpg_key_exists() {
 
 is_system76_hardware() {
     [[ -f /sys/class/dmi/id/sys_vendor ]] && grep -qi "system76" /sys/class/dmi/id/sys_vendor 2>/dev/null
+}
+
+is_pop_os() {
+    [[ -r /etc/os-release ]] && grep -q '^ID=pop$' /etc/os-release
 }
 
 has_nvidia_gpu() {
@@ -370,28 +367,6 @@ flatpak_install() {
     fi
 }
 
-add_apt_repository() {
-    local repo="$1"
-    local ppa_name="$2"
-    local description="${3:-repository}"
-
-    local ppa_id="${repo#ppa:}"
-
-    if ppa_exists "${ppa_id}"; then
-        print_skip "${description}"
-        return 0
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "apt-add-repository ${repo}"
-        return 0
-    fi
-
-    print_status "Adding ${description}..."
-    sudo apt-add-repository -y "${repo}"
-    print_success "${description} added"
-}
-
 # =============================================================================
 # Signed Repository Helper Functions
 # =============================================================================
@@ -496,21 +471,75 @@ install_system76_drivers() {
         return 0
     fi
 
-    add_apt_repository "ppa:system76-dev/stable" "system76-dev/stable" "System76 PPA"
-    apt_install system76-driver
+    if is_pop_os; then
+        print_status "Pop!_OS ships the System76 repository and drivers, skipping"
+        return 0
+    fi
 
+    install_system76_repo
+    apt_update_if_needed
+
+    # system76-driver-nvidia is installed in place of system76-driver and
+    # pulls in the base driver plus the System76-supported NVIDIA stack.
+    local driver_pkg="system76-driver"
     if [[ "${INSTALL_SYSTEM76_NVIDIA}" == true ]]; then
         if ! is_system76_hardware; then
             print_status "Not System76 hardware, skipping System76 NVIDIA drivers"
         elif has_nvidia_gpu; then
             print_status "NVIDIA GPU detected, installing System76 NVIDIA drivers..."
-            apt_install system76-driver-nvidia
+            driver_pkg="system76-driver-nvidia"
         else
             print_status "No NVIDIA GPU detected, skipping NVIDIA drivers"
         fi
     else
         print_warning "Skipping NVIDIA drivers (disabled)"
     fi
+
+    if package_installed "${driver_pkg}"; then
+        print_skip "${driver_pkg}"
+        return 0
+    fi
+
+    apt_install "${driver_pkg}"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "apt full-upgrade"
+        return 0
+    fi
+
+    print_status "Running full upgrade to pull in System76 packages..."
+    sudo apt full-upgrade -y 2>&1 | tee -a "${LOG_FILE}"
+    print_success "System76 drivers installed"
+}
+
+# Installs the system76-ubuntu-repo package, which replaces the deprecated
+# ppa:system76-dev/stable. Its postinst adds the signed apt.pop-os.org
+# release-ubuntu source and comments out the old PPA if present.
+# See https://system76.com/support/system76-driver
+install_system76_repo() {
+    if package_installed system76-ubuntu-repo; then
+        print_skip "System76 Ubuntu repository"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Download and install system76-ubuntu-repo .deb from GitHub releases"
+        return 0
+    fi
+
+    local arch repo_deb
+    arch="$(dpkg --print-architecture)"
+    repo_deb="$(mktemp --suffix=.deb)"
+
+    print_status "Downloading System76 Ubuntu repository package..."
+    curl -fsSL -o "${repo_deb}" \
+        "https://github.com/pop-os/system76-ubuntu-repo/releases/latest/download/system76-ubuntu-repo_${arch}.deb"
+
+    print_status "Installing System76 Ubuntu repository..."
+    sudo apt install -y "${repo_deb}"
+    rm -f "${repo_deb}"
+    print_success "System76 Ubuntu repository added"
+    NEEDS_APT_UPDATE=true
 }
 
 setup_flatpak() {
@@ -909,6 +938,98 @@ install_jdk() {
     fi
 }
 
+# GitTurtle has no published releases, so it is cloned into ~/Developer, built
+# from source with the upstream packager and installed per-user (~/.local/bin +
+# .desktop entry). Git and Rust must be fully installed before this runs.
+# See https://github.com/FernandoX7/GitTurtle/blob/main/docs/linux.md
+install_gitturtle() {
+    print_section "GitTurtle (build from source)"
+
+    local gitturtle_path="${HOME}/.local/bin/gitturtle"
+
+    if command_exists gitturtle || [[ -x "${gitturtle_path}" ]]; then
+        local gitturtle_bin="gitturtle"
+        command_exists gitturtle || gitturtle_bin="${gitturtle_path}"
+        local gitturtle_version
+        gitturtle_version=$("${gitturtle_bin}" --version 2>/dev/null || echo "unknown")
+        print_skip "GitTurtle (${gitturtle_version})"
+        return 0
+    fi
+
+    if [[ "$(dpkg --print-architecture)" != "amd64" ]]; then
+        print_warning "GitTurtle only supports x86-64 on Linux, skipping"
+        return 0
+    fi
+
+    # Prerequisites: both functions are idempotent, so this is a no-op when
+    # main() has already run them.
+    if ! command_exists git; then
+        install_git
+    fi
+    if ! command_exists rustup && [[ ! -x "${HOME}/.cargo/bin/rustup" ]]; then
+        install_rust
+    fi
+
+    # Runtime and build dependencies from GitTurtle's Linux guide
+    apt_install git openssh-client ca-certificates python3 desktop-file-utils xdg-utils \
+        libxcb1 libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 \
+        libwayland-egl1 libfontconfig1 fontconfig fonts-dejavu-core fonts-dejavu-mono \
+        libvulkan1 mesa-vulkan-drivers libegl1 libgl1 libgl1-mesa-dri \
+        xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
+    apt_install build-essential clang cmake pkg-config curl \
+        libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
+        libssl-dev libzstd-dev libvulkan-dev python3-pil
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Create ${DEVELOPER_DIR} if missing"
+        print_dry_run "Clone ${GITTURTLE_REPO} to ${GITTURTLE_SRC_DIR}"
+        print_dry_run "Build with scripts/package-linux.sh and install via install.py"
+        return 0
+    fi
+
+    # shellcheck source=/dev/null
+    [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
+    if ! command_exists git || ! command_exists cargo || ! command_exists rustup; then
+        print_error "Git and Rust (rustup/cargo) are required to build GitTurtle, skipping"
+        return 0
+    fi
+
+    if [[ ! -d "${DEVELOPER_DIR}" ]]; then
+        print_status "Creating ${DEVELOPER_DIR}..."
+        mkdir -p "${DEVELOPER_DIR}"
+    fi
+
+    if [[ -d "${GITTURTLE_SRC_DIR}/.git" ]]; then
+        print_status "Updating GitTurtle clone in ${GITTURTLE_SRC_DIR}..."
+        git -C "${GITTURTLE_SRC_DIR}" pull --ff-only 2>&1 | tee -a "${LOG_FILE}"
+    elif [[ -e "${GITTURTLE_SRC_DIR}" ]]; then
+        print_error "${GITTURTLE_SRC_DIR} exists but is not a git clone, skipping GitTurtle"
+        return 0
+    else
+        print_status "Cloning GitTurtle to ${GITTURTLE_SRC_DIR}..."
+        git clone "${GITTURTLE_REPO}" "${GITTURTLE_SRC_DIR}" 2>&1 | tee -a "${LOG_FILE}"
+    fi
+
+    # The packager refuses existing output paths, so build into a fresh one.
+    # rust-toolchain.toml makes rustup fetch the pinned toolchain automatically.
+    local build_dir bundle_dir
+    build_dir="$(mktemp -d)"
+    bundle_dir="${build_dir}/gitturtle-linux-x86_64"
+
+    print_status "Building GitTurtle (this can take a while)..."
+    (cd "${GITTURTLE_SRC_DIR}" && ./scripts/package-linux.sh "${bundle_dir}") 2>&1 | tee -a "${LOG_FILE}"
+
+    print_status "Installing GitTurtle..."
+    python3 "${bundle_dir}/install.py" 2>&1 | tee -a "${LOG_FILE}"
+    rm -rf "${build_dir}"
+
+    if [[ -x "${gitturtle_path}" ]]; then
+        print_success "GitTurtle $("${gitturtle_path}" --version 2>/dev/null || echo "") installed (open it from Applications)"
+    else
+        print_warning "GitTurtle build finished but ${gitturtle_path} was not found"
+    fi
+}
+
 install_claude_code() {
     print_section "Claude Code CLI"
 
@@ -965,6 +1086,85 @@ install_claude_code() {
         print_success "Claude Code CLI ${claude_version} installed successfully"
     else
         print_warning "Claude Code installed but not found in PATH (may need to restart shell)"
+    fi
+}
+
+install_opencode() {
+    print_section "OpenCode CLI"
+
+    local opencode_bin_dir="${HOME}/.opencode/bin"
+    local opencode_path="${opencode_bin_dir}/opencode"
+
+    if command_exists opencode || [[ -x "${opencode_path}" ]]; then
+        local opencode_bin="opencode"
+        command_exists opencode || opencode_bin="${opencode_path}"
+        local opencode_version
+        opencode_version=$("${opencode_bin}" --version 2>/dev/null || echo "unknown")
+        print_skip "OpenCode CLI (${opencode_version})"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install OpenCode CLI via official installer (curl -fsSL https://opencode.ai/v2/install | bash)"
+        return 0
+    fi
+
+    # The installer adds ~/.opencode/bin to PATH in .bashrc itself
+    print_status "Installing OpenCode CLI..."
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+    curl -fsSL -o "${tmp_installer}" https://opencode.ai/v2/install
+    bash "${tmp_installer}"
+    rm -f "${tmp_installer}"
+    print_success "OpenCode CLI installed"
+
+    export PATH="${opencode_bin_dir}:${PATH}"
+
+    if command_exists opencode; then
+        local opencode_version
+        opencode_version=$(opencode --version 2>/dev/null || echo "unknown")
+        print_success "OpenCode CLI ${opencode_version} installed successfully"
+    else
+        print_warning "OpenCode installed but not found in PATH (may need to restart shell)"
+    fi
+}
+
+install_codex() {
+    print_section "Codex CLI"
+
+    local codex_path="${HOME}/.local/bin/codex"
+
+    if command_exists codex || [[ -x "${codex_path}" ]]; then
+        local codex_bin="codex"
+        command_exists codex || codex_bin="${codex_path}"
+        local codex_version
+        codex_version=$("${codex_bin}" --version 2>/dev/null || echo "unknown")
+        print_skip "Codex CLI (${codex_version})"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Install Codex CLI via official installer (curl -fsSL https://chatgpt.com/codex/install.sh | sh)"
+        return 0
+    fi
+
+    # The installer adds ~/.local/bin to PATH in .bashrc itself
+    print_status "Installing Codex CLI..."
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+    curl -fsSL -o "${tmp_installer}" https://chatgpt.com/codex/install.sh
+    CODEX_NON_INTERACTIVE=1 sh "${tmp_installer}"
+    rm -f "${tmp_installer}"
+    print_success "Codex CLI installed"
+
+    export PATH="${HOME}/.local/bin:${PATH}"
+
+    if command_exists codex; then
+        local codex_version
+        codex_version=$(codex --version 2>/dev/null || echo "unknown")
+        print_success "Codex CLI ${codex_version} installed successfully"
+    else
+        print_warning "Codex installed but not found in PATH (may need to restart shell)"
     fi
 }
 
@@ -1047,6 +1247,49 @@ install_docker() {
     print_success "Docker installation complete!"
     print_status "Docker version: $(docker --version 2>/dev/null || echo 'N/A')"
     print_status "Docker Compose version: $(docker compose version 2>/dev/null || echo 'N/A')"
+}
+
+install_podman() {
+    print_section "Podman"
+
+    if command_exists podman; then
+        local podman_version
+        podman_version=$(podman --version | awk '{print $3}')
+        print_skip "Podman (version ${podman_version})"
+        return 0
+    fi
+
+    apt_install podman
+
+    if command_exists podman; then
+        print_success "Podman $(podman --version | awk '{print $3}') installed (rootless, no daemon required)"
+    fi
+}
+
+install_multipass() {
+    print_section "Multipass"
+
+    if command_exists multipass; then
+        local multipass_version
+        multipass_version=$(multipass version 2>/dev/null | awk 'NR==1 {print $2}')
+        print_skip "Multipass (version ${multipass_version:-unknown})"
+        return 0
+    fi
+
+    # Multipass is only distributed as a snap on Linux
+    if ! command_exists snap; then
+        apt_install snapd
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "snap install multipass"
+        return 0
+    fi
+
+    print_status "Installing Multipass (snap)..."
+    sudo snap install multipass
+    print_success "Multipass installed"
+    print_status "Launch a VM with: multipass launch --name dev"
 }
 
 install_twingate() {
@@ -1484,21 +1727,28 @@ main() {
     install_rust
     install_jdk
 
+    # --- Built From Source (needs Git and Rust above) ---
+    install_gitturtle
+
     # --- Package Managers & CLI Tools ---
     install_npm_packages
     install_claude_code
+    install_opencode
+    install_codex
 
     # --- Security & Passwords ---
     install_1password
 
-    # --- Containers & Infrastructure ---
+    # --- Containers, VMs & Infrastructure ---
     install_docker
+    install_podman
+    install_multipass
     install_twingate
 
     # --- Databases ---
     install_postgresql
 
-    # --- Signed-Repo Apps (Chrome, GitHub CLI, GitHub Desktop, Spotify, pgAdmin, ngrok) ---
+    # --- Signed-Repo Apps (Chrome, GitHub CLI, Spotify, pgAdmin, ngrok) ---
     install_signed_repo_apps
 
     # --- Simple APT Packages (Chromium, FFmpeg, GIMP, Go) ---
