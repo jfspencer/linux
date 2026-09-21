@@ -662,32 +662,6 @@ install_git_lfs() {
     fi
 }
 
-install_gitkraken() {
-    print_section "GitKraken Desktop"
-
-    if command_exists gitkraken || package_installed gitkraken; then
-        print_skip "GitKraken"
-        return 0
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Download and install GitKraken .deb from release.gitkraken.com"
-        return 0
-    fi
-
-    local gitkraken_deb
-    gitkraken_deb="$(mktemp --suffix=.deb)"
-
-    print_status "Downloading GitKraken..."
-    curl -fsSL -o "${gitkraken_deb}" https://release.gitkraken.com/linux/gitkraken-amd64.deb
-    print_success "GitKraken downloaded"
-
-    print_status "Installing GitKraken..."
-    sudo apt install -y "${gitkraken_deb}"
-    rm -f "${gitkraken_deb}"
-    print_success "GitKraken installed"
-}
-
 install_nodejs() {
     print_section "Node.js & npm"
 
@@ -1725,7 +1699,6 @@ main() {
     # --- Version Control ---
     install_git
     install_git_lfs
-    install_gitkraken
 
     # --- Languages & Runtimes ---
     install_nodejs
