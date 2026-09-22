@@ -282,38 +282,39 @@ confirm_action() {
 # Package Management Functions (Idempotent)
 # =============================================================================
 
+# Network tuning applied to every apt call. Without explicit timeouts apt will
+# sit on a dead mirror socket indefinitely -- the failure mode that is
+# indistinguishable from a hang.
+readonly APT_NET_OPTS=(
+    -o "Acquire::http::Timeout=30"
+    -o "Acquire::https::Timeout=30"
+    -o "Acquire::Retries=3"
+)
+
+# Single funnel for apt. Output streams to the terminal and the log at the same
+# time, so a slow mirror (lines still arriving) looks different from a hang (no
+# lines at all). Notes on the incantation:
+#   - 'sudo stdbuf -oL', not 'stdbuf -oL sudo': sudo strips LD_PRELOAD, which is
+#     how stdbuf works, so it has to run under sudo. Without it apt
+#     block-buffers into the pipe and output arrives in silent lumps.
+#   - apt-get rather than apt: it is the stable scripting interface and does not
+#     print the "no stable CLI interface" warning when stdout is a pipe.
+#   - pipefail (set at the top of the script) keeps apt's exit status, not tee's.
+apt_run() {
+    sudo stdbuf -oL apt-get "${APT_NET_OPTS[@]}" "$@" 2>&1 | tee -a "${LOG_FILE}"
+}
+
 apt_update() {
     if [[ "${DRY_RUN}" == true ]]; then
         print_dry_run "apt update"
         return 0
     fi
     print_status "Updating package lists..."
-    local apt_output
-    if apt_output=$(sudo apt update -qq 2>&1); then
+    if apt_run update; then
         print_success "Package lists updated"
     else
         local exit_code=$?
-        log "ERROR" "apt update output: ${apt_output}"
-        print_error "apt update failed (exit code ${exit_code}). Output:"
-        echo "${apt_output}" >&2
-        return ${exit_code}
-    fi
-}
-
-apt_upgrade() {
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "apt upgrade"
-        return 0
-    fi
-    print_status "Upgrading installed packages..."
-    local apt_output
-    if apt_output=$(sudo apt upgrade -y 2>&1); then
-        print_success "Packages upgraded"
-    else
-        local exit_code=$?
-        log "ERROR" "apt upgrade output: ${apt_output}"
-        print_error "apt upgrade failed (exit code ${exit_code}). Output:"
-        echo "${apt_output}" >&2
+        print_error "apt update failed (exit code ${exit_code}); output is above and in ${LOG_FILE}"
         return ${exit_code}
     fi
 }
@@ -339,14 +340,11 @@ apt_install() {
     fi
 
     print_status "Installing packages: ${packages_to_install[*]}"
-    local apt_output
-    if apt_output=$(sudo apt install -y "${packages_to_install[@]}" 2>&1); then
+    if apt_run install -y "${packages_to_install[@]}"; then
         print_success "Packages installed: ${packages_to_install[*]}"
     else
         local exit_code=$?
-        log "ERROR" "apt install output: ${apt_output}"
-        print_error "apt install failed for ${packages_to_install[*]} (exit code ${exit_code}). Output:"
-        echo "${apt_output}" >&2
+        print_error "apt install failed for ${packages_to_install[*]} (exit code ${exit_code}); output is above and in ${LOG_FILE}"
         return ${exit_code}
     fi
 }
@@ -591,7 +589,7 @@ install_system76_repo() {
     repo_deb="$(mktemp --suffix=.deb)"
 
     print_status "Downloading System76 Ubuntu repository package..."
-    curl -fsSL -o "${repo_deb}" \
+    curl -fL --progress-bar -o "${repo_deb}" \
         "https://github.com/pop-os/system76-ubuntu-repo/releases/latest/download/system76-ubuntu-repo_${arch}.deb"
 
     print_status "Installing System76 Ubuntu repository..."
@@ -775,11 +773,9 @@ sync_nodesource_major() {
 
     # Deliberately not apt_install(): that helper skips already-installed
     # packages, which would no-op the whole realignment.
-    local apt_output
-    if apt_output=$(sudo apt install -y --only-upgrade nodejs 2>&1); then
+    if apt_run install -y --only-upgrade nodejs; then
         print_success "apt-level Node.js moved to ${want_major}.x"
     else
-        log "ERROR" "nodejs realign output: ${apt_output}"
         print_warning "Could not upgrade apt-level nodejs to ${want_major}.x (active runtime is unaffected)"
     fi
 }
@@ -1176,7 +1172,7 @@ install_jetbrains_toolbox() {
     tmp_extract="$(mktemp -d)"
 
     print_status "Downloading ${download_url##*/}..."
-    if ! curl -fsSL -o "${tarball}" "${download_url}"; then
+    if ! curl -fL --progress-bar -o "${tarball}" "${download_url}"; then
         print_warning "Failed to download JetBrains Toolbox"
         rm -rf "${tarball}" "${tmp_extract}"
         return 0
@@ -1925,10 +1921,14 @@ main() {
         print_skip "curl"
     fi
 
-    # --- System Updates ---
-    print_section "System Updates"
+    # --- Package Lists ---
+    # No blanket `apt upgrade` here on purpose: upgrading every installed
+    # package during a setup run pulled in unrelated updates and fought the
+    # System76 repo pin (priority 1001, see install_system76_drivers), which
+    # caused instability. Individual steps upgrade what they actually need.
+    # Routine system updates belong in a separate `sudo apt upgrade` by hand.
+    print_section "Package Lists"
     apt_update
-    apt_upgrade
 
     # --- Hardware Drivers ---
     install_system76_drivers
