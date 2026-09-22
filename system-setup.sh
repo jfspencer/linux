@@ -30,7 +30,8 @@ PAUSE_FOR_REBOOT=true
 DRY_RUN=false
 
 # Configurable versions and values
-readonly TARGET_NODE_VERSION="20.19.5"
+# What to hand to `n`: "lts", "latest", or an exact version like "24.19.0".
+readonly TARGET_NODE_CHANNEL="lts"
 readonly TWINGATE_NETWORK="angelstudios"
 readonly GITTURTLE_REPO="https://github.com/FernandoX7/GitTurtle.git"
 readonly DEVELOPER_DIR="${HOME}/Developer"
@@ -117,6 +118,12 @@ readonly FLATPAK_APPS=(
     "me.proton.Mail|Proton Mail"
     "com.valvesoftware.Steam|Steam"
     "org.videolan.VLC|VLC Media Player"
+)
+
+# Flatpak sandbox overrides applied after install: "app.id|Display Name|args"
+# Args are passed verbatim to `flatpak override --user`, space separated.
+readonly FLATPAK_OVERRIDES=(
+    # e.g. "com.example.App|Example App|--filesystem=home"
 )
 
 # NPM global packages
@@ -708,76 +715,144 @@ install_git_lfs() {
     fi
 }
 
+# Runs the official NodeSource bootstrap for a channel ("lts") or major ("24").
+add_nodesource_repo() {
+    local channel="$1"
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+
+    if ! curl -fsSL -o "${tmp_installer}" "https://deb.nodesource.com/setup_${channel}.x"; then
+        rm -f "${tmp_installer}"
+        print_warning "Failed to download NodeSource setup script (setup_${channel}.x)"
+        return 1
+    fi
+
+    sudo -E bash "${tmp_installer}"
+    rm -f "${tmp_installer}"
+    print_success "NodeSource repository configured (${channel})"
+}
+
+# Echoes the NodeSource repo file if present. Recent setup scripts write
+# deb822 (nodesource.sources); older ones wrote a one-line nodesource.list.
+nodesource_repo_file() {
+    local candidate
+    for candidate in /etc/apt/sources.list.d/nodesource.sources \
+                     /etc/apt/sources.list.d/nodesource.list; do
+        if [[ -f "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Reads the major pinned in the NodeSource repo, e.g. ".../node_20.x" -> 20.
+nodesource_major() {
+    local repo_file
+    repo_file="$(nodesource_repo_file)" || return 1
+    sed -n 's|.*/node_\([0-9][0-9]*\)\.x.*|\1|p' "${repo_file}" | head -1
+}
+
+# NodeSource pins its repo to one major, so a repo file left over from an
+# earlier run keeps apt's nodejs on a stale major even after 'n' has moved the
+# active runtime. Rewrite the repo and upgrade when the two disagree.
+sync_nodesource_major() {
+    local want_major="$1"
+    local current_major
+
+    if ! current_major="$(nodesource_major)" || [[ -z "${current_major}" ]]; then
+        print_status "No NodeSource repository to realign"
+        return 0
+    fi
+
+    if [[ "${current_major}" == "${want_major}" ]]; then
+        print_skip "NodeSource repository ${want_major}.x"
+        return 0
+    fi
+
+    print_status "NodeSource repo is on ${current_major}.x but active Node is ${want_major}.x; realigning..."
+    add_nodesource_repo "${want_major}" || return 0
+
+    # Deliberately not apt_install(): that helper skips already-installed
+    # packages, which would no-op the whole realignment.
+    local apt_output
+    if apt_output=$(sudo apt install -y --only-upgrade nodejs 2>&1); then
+        print_success "apt-level Node.js moved to ${want_major}.x"
+    else
+        log "ERROR" "nodejs realign output: ${apt_output}"
+        print_warning "Could not upgrade apt-level nodejs to ${want_major}.x (active runtime is unaffected)"
+    fi
+}
+
+# Resolves TARGET_NODE_CHANNEL to a concrete version using 'n' (requires 'n').
+resolve_node_target() {
+    case "${TARGET_NODE_CHANNEL}" in
+        lts)    n --lts 2>/dev/null ;;
+        latest) n --latest 2>/dev/null ;;
+        *)      echo "${TARGET_NODE_CHANNEL}" ;;
+    esac
+}
+
 install_nodejs() {
     print_section "Node.js & npm"
 
-    local skip_install=false
-
-    if command_exists node && command_exists npm; then
-        local node_version npm_version
-        node_version=$(node --version | sed 's/^v//')
-        npm_version=$(npm --version)
-
-        if [[ "${node_version}" == "${TARGET_NODE_VERSION}" ]]; then
-            print_skip "Node.js v${node_version} & npm ${npm_version}"
-            skip_install=true
-        else
-            print_status "Current Node.js version: ${node_version}, target: ${TARGET_NODE_VERSION}"
-        fi
-    fi
-
-    if [[ "${skip_install}" == false ]]; then
-        local nodesource_list="/etc/apt/sources.list.d/nodesource.list"
-
-        if [[ ! -f "${nodesource_list}" ]]; then
-            if [[ "${DRY_RUN}" == true ]]; then
-                print_dry_run "Add NodeSource repository and install Node.js (LTS)"
-            else
-                print_status "Adding NodeSource repository for Node.js LTS..."
-                local tmp_installer
-                tmp_installer="$(mktemp)"
-                curl -fsSL -o "${tmp_installer}" https://deb.nodesource.com/setup_lts.x
-                sudo -E bash "${tmp_installer}"
-                rm -f "${tmp_installer}"
-                print_success "NodeSource repository added"
-            fi
-        else
-            print_skip "NodeSource repository"
-        fi
-
-        apt_install nodejs
-
-        if command_exists npm; then
-            local npm_version
-            npm_version=$(npm --version)
-            print_success "npm ${npm_version} installed"
-        fi
-
+    # Bootstrap: NodeSource supplies the node/npm used to install 'n'. After
+    # that, 'n' owns the active runtime and sync_nodesource_major() keeps the
+    # apt-level copy on the same major.
+    if ! nodesource_repo_file >/dev/null; then
         if [[ "${DRY_RUN}" == true ]]; then
-            print_dry_run "npm install -g n"
-            print_dry_run "n ${TARGET_NODE_VERSION}"
+            print_dry_run "Add NodeSource repository (lts) and install Node.js"
         else
-            if ! command_exists n; then
-                print_status "Installing 'n' Node version manager..."
-                sudo npm install -g n
-                print_success "'n' installed"
-            else
-                print_skip "'n' Node version manager"
-            fi
-
-            print_status "Installing Node.js ${TARGET_NODE_VERSION} using 'n'..."
-            sudo n "${TARGET_NODE_VERSION}"
-            print_success "Node.js ${TARGET_NODE_VERSION} installed"
-
-            export PATH="/usr/local/bin:${PATH}"
-
-            if command_exists node; then
-                local new_node_version
-                new_node_version=$(node --version)
-                print_success "Active Node.js version: ${new_node_version}"
-            fi
+            print_status "Adding NodeSource repository for Node.js LTS..."
+            add_nodesource_repo "lts" || true
         fi
+    else
+        print_skip "NodeSource repository"
     fi
+
+    apt_install nodejs
+
+    if command_exists npm; then
+        local npm_version
+        npm_version=$(npm --version)
+        print_success "npm ${npm_version} installed"
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "npm install -g n"
+        print_dry_run "n ${TARGET_NODE_CHANNEL}"
+        print_dry_run "Realign NodeSource repository with the active Node major"
+        return 0
+    fi
+
+    if ! command_exists n; then
+        print_status "Installing 'n' Node version manager..."
+        sudo npm install -g n
+        print_success "'n' installed"
+    else
+        print_skip "'n' Node version manager"
+    fi
+
+    local target_version current_version=""
+    target_version="$(resolve_node_target)"
+    command_exists node && current_version="$(node --version | sed 's/^v//')"
+
+    if [[ -n "${target_version}" && "${current_version}" == "${target_version}" ]]; then
+        print_skip "Node.js v${current_version} (${TARGET_NODE_CHANNEL})"
+    else
+        print_status "Installing Node.js (${TARGET_NODE_CHANNEL}${target_version:+ -> ${target_version}}) using 'n'..."
+        sudo n "${TARGET_NODE_CHANNEL}"
+    fi
+
+    export PATH="/usr/local/bin:${PATH}"
+    hash -r 2>/dev/null || true
+
+    local active_version active_major
+    active_version="$(node --version | sed 's/^v//')"
+    active_major="${active_version%%.*}"
+    print_success "Active Node.js version: v${active_version}"
+
+    sync_nodesource_major "${active_major}"
 }
 
 install_npm_packages() {
@@ -1054,6 +1129,94 @@ install_gitturtle() {
     else
         print_warning "GitTurtle build finished but ${gitturtle_path} was not found"
     fi
+}
+
+# JetBrains ships Toolbox only as a tarball -- no apt repo, and the snap is a
+# third-party repackage. Installed per-user (no sudo), which is how Toolbox
+# expects to live; it then manages the IDEs (IntelliJ, etc.) and its own updates.
+install_jetbrains_toolbox() {
+    print_section "JetBrains Toolbox"
+
+    local toolbox_home="${HOME}/.local/share/JetBrains/Toolbox"
+    local launcher="${toolbox_home}/bin/jetbrains-toolbox"
+
+    if [[ -x "${launcher}" ]]; then
+        print_skip "JetBrains Toolbox"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_dry_run "Download JetBrains Toolbox tarball and install to ${toolbox_home}"
+        return 0
+    fi
+
+    # Ask JetBrains for the current release rather than pinning a version.
+    print_status "Resolving latest JetBrains Toolbox release..."
+    local release_json download_url
+    release_json="$(curl -fsSL "https://data.services.jetbrains.com/products/releases?code=TBA&latest=true&type=release")" || {
+        print_warning "Could not reach JetBrains release API, skipping Toolbox"
+        return 0
+    }
+
+    # The JSON lists linuxARM64 before linux, so match the arch key explicitly
+    # rather than taking the first tarball URL that appears.
+    local arch_key="linux"
+    if [[ "$(dpkg --print-architecture)" == "arm64" ]]; then
+        arch_key="linuxARM64"
+    fi
+    download_url="$(echo "${release_json}" | grep -oP "\"${arch_key}\"\s*:\s*\{\s*\"link\"\s*:\s*\"\K[^\"]+")"
+
+    if [[ -z "${download_url}" ]]; then
+        print_warning "Could not parse Toolbox download URL, skipping"
+        return 0
+    fi
+
+    local tarball tmp_extract
+    tarball="$(mktemp --suffix=.tar.gz)"
+    tmp_extract="$(mktemp -d)"
+
+    print_status "Downloading ${download_url##*/}..."
+    if ! curl -fsSL -o "${tarball}" "${download_url}"; then
+        print_warning "Failed to download JetBrains Toolbox"
+        rm -rf "${tarball}" "${tmp_extract}"
+        return 0
+    fi
+
+    # Verify against the published checksum before unpacking anything.
+    local expected_sha actual_sha
+    if expected_sha="$(curl -fsSL "${download_url}.sha256" | awk '{print $1}')" && [[ -n "${expected_sha}" ]]; then
+        actual_sha="$(sha256sum "${tarball}" | awk '{print $1}')"
+        if [[ "${expected_sha}" != "${actual_sha}" ]]; then
+            print_error "Toolbox checksum mismatch (expected ${expected_sha}, got ${actual_sha})"
+            rm -rf "${tarball}" "${tmp_extract}"
+            return 1
+        fi
+        print_success "Checksum verified"
+    else
+        print_warning "Could not fetch Toolbox checksum, continuing unverified"
+    fi
+
+    print_status "Installing to ${toolbox_home}..."
+    tar -xzf "${tarball}" -C "${tmp_extract}"
+
+    local unpacked
+    unpacked="$(find "${tmp_extract}" -maxdepth 1 -mindepth 1 -type d | head -1)"
+    if [[ -z "${unpacked}" ]]; then
+        print_warning "Unexpected Toolbox archive layout, skipping"
+        rm -rf "${tarball}" "${tmp_extract}"
+        return 0
+    fi
+
+    # The archive's top-level directory already contains bin/, so copy its
+    # contents into toolbox_home rather than into toolbox_home/bin.
+    mkdir -p "${toolbox_home}" "${HOME}/.local/bin"
+    cp -a "${unpacked}/." "${toolbox_home}/"
+    chmod +x "${launcher}"
+    ln -sf "${launcher}" "${HOME}/.local/bin/jetbrains-toolbox"
+    rm -rf "${tarball}" "${tmp_extract}"
+
+    print_success "JetBrains Toolbox installed"
+    print_status "Run 'jetbrains-toolbox' to sign in and install IntelliJ IDEA Ultimate"
 }
 
 install_claude_code() {
@@ -1481,6 +1644,40 @@ install_flatpak_apps() {
     if [[ ${#failed_apps[@]} -gt 0 ]]; then
         print_warning "Failed to install: ${failed_apps[*]}"
     fi
+
+    apply_flatpak_overrides
+}
+
+# Applies FLATPAK_OVERRIDES entries to apps that are actually installed.
+apply_flatpak_overrides() {
+    if [[ ${#FLATPAK_OVERRIDES[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo ""
+    local entry app_id app_name args
+    for entry in "${FLATPAK_OVERRIDES[@]}"; do
+        IFS='|' read -r app_id app_name args <<< "${entry}"
+
+        if ! flatpak_installed "${app_id}"; then
+            print_status "Skipping ${app_name} sandbox override (not installed)"
+            continue
+        fi
+
+        if [[ "${DRY_RUN}" == true ]]; then
+            print_dry_run "flatpak override --user ${args} ${app_id}"
+            continue
+        fi
+
+        print_status "Applying sandbox override for ${app_name}..."
+        # shellcheck disable=SC2086  # args are intentionally word split
+        if flatpak override --user ${args} "${app_id}"; then
+            print_success "${app_name} override applied (${args})"
+        else
+            print_warning "Failed to apply override for ${app_name}"
+            log "ERROR" "flatpak override failed: ${app_id} (${args})"
+        fi
+    done
 }
 
 # =============================================================================
@@ -1751,6 +1948,7 @@ main() {
     install_bun
     install_rust
     install_jdk
+    install_jetbrains_toolbox
 
     # --- Built From Source (needs Git and Rust above) ---
     install_gitturtle
