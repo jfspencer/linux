@@ -87,6 +87,7 @@ readonly SIMPLE_APT_APPS=(
     "ffmpeg|ffmpeg|FFmpeg"
     "gimp|gimp|GIMP Image Editor"
     "go|golang-go|Go Programming Language"
+    "wormhole|magic-wormhole|Magic Wormhole"
 )
 
 # Flatpak applications: "app.id|Display Name"
