@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 #
 # System Setup Script
-# Configures a fresh Ubuntu/Pop!_OS installation with common development tools
+# Configures a fresh Ubuntu/Pop!_OS installation with common development tools.
+# Sets are additive and auto-detected per machine: base tooling on every
+# system, plus the desktop set on graphical machines or the server set on
+# headless ones, plus System76 drivers on System76 hardware.
+# Override detection with --server/--desktop and --force-system76/--skip-system76.
 #
 # Usage: ./system-setup.sh [OPTIONS]
+#   --server                  Install the server set (skip desktop-only components)
+#   --desktop                 Install the desktop set even if a server is detected
 #   --force-system76          Force System76 driver installation (auto-detected by default)
 #   --skip-system76           Skip System76 driver installation even if detected
 #   --skip-system76-nvidia    Skip NVIDIA driver installation
@@ -23,6 +29,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LOG_FILE="${SCRIPT_DIR}/setup-$(date +%Y%m%d-%H%M%S).log"
 
 # Feature flags (can be overridden via command line)
+SERVER_MODE="auto"  # auto, true, or false
 INSTALL_SYSTEM76="auto"  # auto, true, or false
 INSTALL_SYSTEM76_NVIDIA=true
 INSTALL_FLATPAK=true
@@ -30,8 +37,6 @@ PAUSE_FOR_REBOOT=true
 DRY_RUN=false
 
 # Configurable versions and values
-# What to hand to `n`: "lts", "latest", or an exact version like "24.19.0".
-readonly TARGET_NODE_CHANNEL="lts"
 readonly TWINGATE_NETWORK="angelstudios"
 readonly GITTURTLE_REPO="https://github.com/FernandoX7/GitTurtle.git"
 readonly DEVELOPER_DIR="${HOME}/Developer"
@@ -88,7 +93,21 @@ readonly SIMPLE_APT_APPS=(
     "ffmpeg|ffmpeg|FFmpeg"
     "gimp|gimp|GIMP Image Editor"
     "go|golang-go|Go Programming Language"
+    "tmux|tmux|tmux"
     "wormhole|magic-wormhole|Magic Wormhole"
+)
+
+# Desktop-set applications, skipped when the server set is active.
+# Signed-repo entries match labels in SIGNED_REPO_APPS; apt entries match
+# package names in SIMPLE_APT_APPS.
+readonly DESKTOP_ONLY_SIGNED_REPO_APPS=(
+    "Google Chrome"
+    "Spotify"
+    "pgAdmin 4"
+)
+readonly DESKTOP_ONLY_SIMPLE_APT_APPS=(
+    "chromium-browser"
+    "gimp"
 )
 
 # Flatpak applications: "app.id|Display Name"
@@ -231,6 +250,17 @@ command_exists() {
     command -v "$1" &>/dev/null
 }
 
+# True when the first argument appears in the remaining arguments.
+list_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [[ "${item}" == "${needle}" ]] && return 0
+    done
+    return 1
+}
+
 package_installed() {
     dpkg -l "$1" 2>/dev/null | grep -q "^ii"
 }
@@ -256,6 +286,31 @@ is_system76_hardware() {
 
 is_pop_os() {
     [[ -r /etc/os-release ]] && grep -q '^ID=pop$' /etc/os-release
+}
+
+# Treats a machine as a server when it has no graphical session and no desktop
+# metapackage, and looks like Ubuntu Server (metapackage or headless boot
+# target). Unknown setups stay on the desktop path; --server/--desktop override.
+is_server_environment() {
+    # A graphical session means desktop, no matter which metapackages exist.
+    if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${XDG_CURRENT_DESKTOP:-}" ]]; then
+        return 1
+    fi
+
+    if package_installed ubuntu-desktop \
+        || package_installed ubuntu-desktop-minimal \
+        || package_installed pop-desktop; then
+        return 1
+    fi
+
+    if package_installed ubuntu-server || package_installed ubuntu-server-minimal; then
+        return 0
+    fi
+
+    # Minimal installs can lack the metapackage; no desktop packages plus a
+    # multi-user boot target is still a server.
+    [[ -r /etc/os-release ]] && grep -q '^ID=ubuntu' /etc/os-release \
+        && [[ "$(systemctl get-default 2>/dev/null)" == "multi-user.target" ]]
 }
 
 has_nvidia_gpu() {
@@ -602,6 +657,11 @@ install_system76_repo() {
 setup_flatpak() {
     print_section "Flatpak Setup"
 
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_warning "Skipping Flatpak setup (server mode)"
+        return 0
+    fi
+
     if [[ "${INSTALL_FLATPAK}" != true ]]; then
         print_warning "Skipping Flatpak setup (disabled)"
         return 0
@@ -654,6 +714,11 @@ setup_flatpak() {
 
 install_brave() {
     print_section "Brave Browser"
+
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_warning "Skipping Brave browser (server mode)"
+        return 0
+    fi
 
     if command_exists brave-browser; then
         print_skip "Brave browser"
@@ -713,144 +778,6 @@ install_git_lfs() {
     fi
 }
 
-# Runs the official NodeSource bootstrap for a channel ("lts") or major ("24").
-add_nodesource_repo() {
-    local channel="$1"
-    local tmp_installer
-    tmp_installer="$(mktemp)"
-
-    if ! curl -fsSL -o "${tmp_installer}" "https://deb.nodesource.com/setup_${channel}.x"; then
-        rm -f "${tmp_installer}"
-        print_warning "Failed to download NodeSource setup script (setup_${channel}.x)"
-        return 1
-    fi
-
-    sudo -E bash "${tmp_installer}"
-    rm -f "${tmp_installer}"
-    print_success "NodeSource repository configured (${channel})"
-}
-
-# Echoes the NodeSource repo file if present. Recent setup scripts write
-# deb822 (nodesource.sources); older ones wrote a one-line nodesource.list.
-nodesource_repo_file() {
-    local candidate
-    for candidate in /etc/apt/sources.list.d/nodesource.sources \
-                     /etc/apt/sources.list.d/nodesource.list; do
-        if [[ -f "${candidate}" ]]; then
-            echo "${candidate}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Reads the major pinned in the NodeSource repo, e.g. ".../node_20.x" -> 20.
-nodesource_major() {
-    local repo_file
-    repo_file="$(nodesource_repo_file)" || return 1
-    sed -n 's|.*/node_\([0-9][0-9]*\)\.x.*|\1|p' "${repo_file}" | head -1
-}
-
-# NodeSource pins its repo to one major, so a repo file left over from an
-# earlier run keeps apt's nodejs on a stale major even after 'n' has moved the
-# active runtime. Rewrite the repo and upgrade when the two disagree.
-sync_nodesource_major() {
-    local want_major="$1"
-    local current_major
-
-    if ! current_major="$(nodesource_major)" || [[ -z "${current_major}" ]]; then
-        print_status "No NodeSource repository to realign"
-        return 0
-    fi
-
-    if [[ "${current_major}" == "${want_major}" ]]; then
-        print_skip "NodeSource repository ${want_major}.x"
-        return 0
-    fi
-
-    print_status "NodeSource repo is on ${current_major}.x but active Node is ${want_major}.x; realigning..."
-    add_nodesource_repo "${want_major}" || return 0
-
-    # Deliberately not apt_install(): that helper skips already-installed
-    # packages, which would no-op the whole realignment.
-    if apt_run install -y --only-upgrade nodejs; then
-        print_success "apt-level Node.js moved to ${want_major}.x"
-    else
-        print_warning "Could not upgrade apt-level nodejs to ${want_major}.x (active runtime is unaffected)"
-    fi
-}
-
-# Resolves TARGET_NODE_CHANNEL to a concrete version using 'n' (requires 'n').
-resolve_node_target() {
-    case "${TARGET_NODE_CHANNEL}" in
-        lts)    n --lts 2>/dev/null ;;
-        latest) n --latest 2>/dev/null ;;
-        *)      echo "${TARGET_NODE_CHANNEL}" ;;
-    esac
-}
-
-install_nodejs() {
-    print_section "Node.js & npm"
-
-    # Bootstrap: NodeSource supplies the node/npm used to install 'n'. After
-    # that, 'n' owns the active runtime and sync_nodesource_major() keeps the
-    # apt-level copy on the same major.
-    if ! nodesource_repo_file >/dev/null; then
-        if [[ "${DRY_RUN}" == true ]]; then
-            print_dry_run "Add NodeSource repository (lts) and install Node.js"
-        else
-            print_status "Adding NodeSource repository for Node.js LTS..."
-            add_nodesource_repo "lts" || true
-        fi
-    else
-        print_skip "NodeSource repository"
-    fi
-
-    apt_install nodejs
-
-    if command_exists npm; then
-        local npm_version
-        npm_version=$(npm --version)
-        print_success "npm ${npm_version} installed"
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "npm install -g n"
-        print_dry_run "n ${TARGET_NODE_CHANNEL}"
-        print_dry_run "Realign NodeSource repository with the active Node major"
-        return 0
-    fi
-
-    if ! command_exists n; then
-        print_status "Installing 'n' Node version manager..."
-        sudo npm install -g n
-        print_success "'n' installed"
-    else
-        print_skip "'n' Node version manager"
-    fi
-
-    local target_version current_version=""
-    target_version="$(resolve_node_target)"
-    command_exists node && current_version="$(node --version | sed 's/^v//')"
-
-    if [[ -n "${target_version}" && "${current_version}" == "${target_version}" ]]; then
-        print_skip "Node.js v${current_version} (${TARGET_NODE_CHANNEL})"
-    else
-        print_status "Installing Node.js (${TARGET_NODE_CHANNEL}${target_version:+ -> ${target_version}}) using 'n'..."
-        sudo n "${TARGET_NODE_CHANNEL}"
-    fi
-
-    export PATH="/usr/local/bin:${PATH}"
-    hash -r 2>/dev/null || true
-
-    local active_version active_major
-    active_version="$(node --version | sed 's/^v//')"
-    active_major="${active_version%%.*}"
-    print_success "Active Node.js version: v${active_version}"
-
-    sync_nodesource_major "${active_major}"
-}
-
 install_npm_packages() {
     print_section "NPM Global Packages"
 
@@ -888,59 +815,6 @@ install_npm_packages() {
     fi
     if [[ ${skipped_count} -gt 0 ]]; then
         print_status "Already installed: ${skipped_count} packages"
-    fi
-}
-
-install_bun() {
-    print_section "Bun Runtime"
-
-    local bun_path="${HOME}/.bun/bin/bun"
-    if command_exists bun || [[ -f "${bun_path}" ]]; then
-        local bun_version
-        if command_exists bun; then
-            bun_version=$(bun --version)
-        else
-            bun_version=$("${bun_path}" --version)
-        fi
-        print_skip "Bun (version ${bun_version})"
-        return 0
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install Bun via official install script"
-        print_dry_run "Add Bun to PATH in .bashrc"
-        return 0
-    fi
-
-    print_status "Installing Bun runtime..."
-    local tmp_installer
-    tmp_installer="$(mktemp)"
-    curl -fsSL -o "${tmp_installer}" https://bun.sh/install
-    bash "${tmp_installer}"
-    rm -f "${tmp_installer}"
-    print_success "Bun installed"
-
-    local path_entry="export PATH=\"\${HOME}/.bun/bin:\${PATH}\""
-    local bashrc="${HOME}/.bashrc"
-
-    if ! grep -qF ".bun/bin" "${bashrc}" 2>/dev/null; then
-        print_status "Adding Bun to PATH in .bashrc..."
-        echo "" >> "${bashrc}"
-        echo "# Bun" >> "${bashrc}"
-        echo "${path_entry}" >> "${bashrc}"
-        print_success "Added Bun to PATH"
-    else
-        print_skip "Bun PATH entry"
-    fi
-
-    export PATH="${HOME}/.bun/bin:${PATH}"
-
-    if command_exists bun; then
-        local bun_version
-        bun_version=$(bun --version)
-        print_success "Bun ${bun_version} installed successfully"
-    else
-        print_warning "Bun installed but not found in PATH (may need to restart shell)"
     fi
 }
 
@@ -1024,7 +898,14 @@ install_jdk() {
         return 0
     fi
 
-    apt_install default-jdk
+    # default-jdk pulls in the X11/AWT GUI stack; use the headless variant on
+    # servers, where no GUI packages should be present.
+    local jdk_pkg="default-jdk"
+    if [[ "${SERVER_MODE}" == true ]]; then
+        jdk_pkg="default-jdk-headless"
+    fi
+
+    apt_install "${jdk_pkg}"
 
     if command_exists java && command_exists javac; then
         local java_version
@@ -1041,6 +922,11 @@ install_jdk() {
 # See https://github.com/FernandoX7/GitTurtle/blob/main/docs/linux.md
 install_gitturtle() {
     print_section "GitTurtle (build from source)"
+
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_warning "Skipping GitTurtle (server mode)"
+        return 0
+    fi
 
     local gitturtle_path="${HOME}/.local/bin/gitturtle"
 
@@ -1132,6 +1018,11 @@ install_gitturtle() {
 # expects to live; it then manages the IDEs (IntelliJ, etc.) and its own updates.
 install_jetbrains_toolbox() {
     print_section "JetBrains Toolbox"
+
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_warning "Skipping JetBrains Toolbox (server mode)"
+        return 0
+    fi
 
     local toolbox_home="${HOME}/.local/share/JetBrains/Toolbox"
     local launcher="${toolbox_home}/bin/jetbrains-toolbox"
@@ -1274,41 +1165,85 @@ install_claude_code() {
     fi
 }
 
+# Runs the official installer, which always downloads the latest release.
+run_opencode_installer() {
+    local tmp_installer
+    tmp_installer="$(mktemp)"
+    curl -fsSL -o "${tmp_installer}" https://opencode.ai/v2/install
+    bash "${tmp_installer}"
+    rm -f "${tmp_installer}"
+}
+
+# The official installer has no system-wide mode (it always targets
+# ~/.opencode/bin), so "globally installed" means the binary is on PATH for the
+# user rather than vendored into a project. Existing installs are upgraded --
+# 'opencode upgrade' is a no-op when already current -- so the machine ends up
+# on the latest release instead of keeping a stale copy.
 install_opencode() {
     print_section "OpenCode CLI"
 
     local opencode_bin_dir="${HOME}/.opencode/bin"
     local opencode_path="${opencode_bin_dir}/opencode"
 
-    if command_exists opencode || [[ -x "${opencode_path}" ]]; then
-        local opencode_bin="opencode"
-        command_exists opencode || opencode_bin="${opencode_path}"
-        local opencode_version
-        opencode_version=$("${opencode_bin}" --version 2>/dev/null || echo "unknown")
-        print_skip "OpenCode CLI (${opencode_version})"
-        return 0
+    # Resolve an existing install, whether on PATH or only in the install dir.
+    local opencode_bin=""
+    if command_exists opencode; then
+        opencode_bin="opencode"
+    elif [[ -x "${opencode_path}" ]]; then
+        opencode_bin="${opencode_path}"
     fi
 
     if [[ "${DRY_RUN}" == true ]]; then
-        print_dry_run "Install OpenCode CLI via official installer (curl -fsSL https://opencode.ai/v2/install | bash)"
+        if [[ -n "${opencode_bin}" ]]; then
+            print_dry_run "opencode upgrade to the latest version (currently $("${opencode_bin}" --version 2>/dev/null || echo "unknown"))"
+        else
+            print_dry_run "Install OpenCode CLI via official installer (curl -fsSL https://opencode.ai/v2/install | bash)"
+        fi
         return 0
     fi
 
-    # The installer adds ~/.opencode/bin to PATH in .bashrc itself
-    print_status "Installing OpenCode CLI..."
-    local tmp_installer
-    tmp_installer="$(mktemp)"
-    curl -fsSL -o "${tmp_installer}" https://opencode.ai/v2/install
-    bash "${tmp_installer}"
-    rm -f "${tmp_installer}"
-    print_success "OpenCode CLI installed"
+    if [[ -n "${opencode_bin}" ]]; then
+        local installed_version
+        installed_version="$("${opencode_bin}" --version 2>/dev/null || echo "unknown")"
+        print_status "Upgrading OpenCode CLI to the latest version (installed: ${installed_version})..."
+        if ! "${opencode_bin}" upgrade 2>&1 | tee -a "${LOG_FILE}"; then
+            print_warning "opencode upgrade failed; reinstalling via the official installer..."
+            run_opencode_installer
+        fi
+    else
+        print_status "Installing OpenCode CLI (latest)..."
+        run_opencode_installer
+    fi
 
     export PATH="${opencode_bin_dir}:${PATH}"
+    hash -r 2>/dev/null || true
 
-    if command_exists opencode; then
-        local opencode_version
-        opencode_version=$(opencode --version 2>/dev/null || echo "unknown")
-        print_success "OpenCode CLI ${opencode_version} installed successfully"
+    # The installer adds ~/.opencode/bin to PATH itself; keep a check here so
+    # the entry exists even when the binary came from another source.
+    if [[ -x "${opencode_path}" ]]; then
+        local bashrc="${HOME}/.bashrc"
+        if ! grep -qF ".opencode/bin" "${bashrc}" 2>/dev/null; then
+            print_status "Adding ~/.opencode/bin to PATH in .bashrc..."
+            {
+                echo ""
+                echo "# opencode"
+                echo "export PATH=\"\${HOME}/.opencode/bin:\${PATH}\""
+            } >> "${bashrc}"
+            print_success "Added ~/.opencode/bin to PATH"
+        else
+            print_skip "~/.opencode/bin PATH entry"
+        fi
+    fi
+
+    local final_bin=""
+    if [[ -x "${opencode_path}" ]]; then
+        final_bin="${opencode_path}"
+    elif command_exists opencode; then
+        final_bin="opencode"
+    fi
+
+    if [[ -n "${final_bin}" ]]; then
+        print_success "OpenCode CLI $("${final_bin}" --version 2>/dev/null || echo "unknown") ready (latest release)"
     else
         print_warning "OpenCode installed but not found in PATH (may need to restart shell)"
     fi
@@ -1355,6 +1290,11 @@ install_codex() {
 
 install_1password() {
     print_section "1Password"
+
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_warning "Skipping 1Password desktop app (server mode; install 1password-cli separately if needed)"
+        return 0
+    fi
 
     if package_installed 1password; then
         print_skip "1Password"
@@ -1557,6 +1497,11 @@ install_signed_repo_apps() {
 
         print_section "${label}"
 
+        if [[ "${SERVER_MODE}" == true ]] && list_contains "${label}" "${DESKTOP_ONLY_SIGNED_REPO_APPS[@]}"; then
+            print_warning "Skipping ${label} (desktop app; server mode)"
+            continue
+        fi
+
         # Check if first package is already installed
         local first_pkg="${packages%% *}"
         if package_installed "${first_pkg}"; then
@@ -1588,6 +1533,11 @@ install_simple_apt_apps() {
         local cmd_name pkg_name display_name
         IFS='|' read -r cmd_name pkg_name display_name <<< "${entry}"
 
+        if [[ "${SERVER_MODE}" == true ]] && list_contains "${pkg_name}" "${DESKTOP_ONLY_SIMPLE_APT_APPS[@]}"; then
+            print_warning "Skipping ${display_name} (desktop app; server mode)"
+            continue
+        fi
+
         if command_exists "${cmd_name}" || package_installed "${pkg_name}"; then
             print_skip "${display_name}"
             continue
@@ -1600,6 +1550,11 @@ install_simple_apt_apps() {
 # Installs all FLATPAK_APPS entries.
 install_flatpak_apps() {
     print_section "Flatpak Apps"
+
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_warning "Skipping Flatpak apps (server mode)"
+        return 0
+    fi
 
     if [[ "${INSTALL_FLATPAK}" != true ]]; then
         print_warning "Skipping Flatpak apps (Flatpak disabled)"
@@ -1682,6 +1637,11 @@ apply_flatpak_overrides() {
 
 install_desktop_settings() {
     print_section "Desktop Settings (Ubuntu/Wayland)"
+
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_warning "Skipping desktop settings (server mode)"
+        return 0
+    fi
 
     if ! command_exists gsettings; then
         print_warning "gsettings not available, skipping desktop configuration"
@@ -1810,6 +1770,42 @@ install_desktop_settings() {
 # Setup Helpers
 # =============================================================================
 
+# Resolves SERVER_MODE when left on "auto" and reports the active sets. Sets
+# are additive: every machine gets the base set, graphical machines add the
+# desktop set (headless ones get the server set instead), and System76
+# hardware adds its driver overlay regardless of the environment.
+resolve_server_mode() {
+    local environment reason=""
+
+    case "${SERVER_MODE}" in
+        auto)
+            if is_server_environment; then
+                SERVER_MODE=true
+                reason=" (auto-detected)"
+            else
+                SERVER_MODE=false
+            fi
+            ;;
+        true)
+            reason=" (forced with --server)"
+            ;;
+        false)
+            reason=" (forced with --desktop)"
+            ;;
+    esac
+
+    if [[ "${SERVER_MODE}" == true ]]; then
+        environment="server"
+    else
+        environment="desktop"
+    fi
+
+    print_status "Environment: ${environment}${reason}; installing base + ${environment} sets"
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_status "Desktop-only components (GUI apps, Flatpak, desktop settings) are skipped"
+    fi
+}
+
 setup_sudo_keepalive() {
     if [[ "${DRY_RUN}" == true ]]; then
         return 0
@@ -1838,6 +1834,8 @@ System Setup Script
 Configures a fresh Ubuntu/Pop!_OS installation with common development tools
 
 Usage: ./system-setup.sh [OPTIONS]
+  --server                  Install the server set (skip desktop-only components)
+  --desktop                 Install the desktop set even if a server is detected
   --force-system76          Force System76 driver installation (auto-detected by default)
   --skip-system76           Skip System76 driver installation even if detected
   --skip-system76-nvidia    Skip NVIDIA driver installation
@@ -1852,6 +1850,14 @@ HELPEOF
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --server)
+                SERVER_MODE=true
+                shift
+                ;;
+            --desktop)
+                SERVER_MODE=false
+                shift
+                ;;
             --force-system76)
                 INSTALL_SYSTEM76=true
                 shift
@@ -1904,6 +1910,9 @@ main() {
     print_status "Log file: ${LOG_FILE}"
     echo ""
 
+    # Determine server vs desktop before anything installs
+    resolve_server_mode
+
     # Sudo setup
     setup_sudo_keepalive
 
@@ -1930,7 +1939,7 @@ main() {
     print_section "Package Lists"
     apt_update
 
-    # --- Hardware Drivers ---
+    # --- Hardware Overlay (auto-detected System76 machines) ---
     install_system76_drivers
 
     # --- Flatpak Infrastructure ---
@@ -1944,8 +1953,6 @@ main() {
     install_git_lfs
 
     # --- Languages & Runtimes ---
-    install_nodejs
-    install_bun
     install_rust
     install_jdk
     install_jetbrains_toolbox
@@ -1997,6 +2004,9 @@ main() {
     # --- Summary ---
     print_section "Setup Complete"
     print_success "System setup finished successfully!"
+    if [[ "${SERVER_MODE}" == true ]]; then
+        print_status "Server mode: desktop-only components were skipped (use --desktop to include them)"
+    fi
     print_status "Log file saved to: ${LOG_FILE}"
     echo ""
     print_warning "Recommended: Restart your computer to ensure all changes take effect"
